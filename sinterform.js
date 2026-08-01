@@ -169,24 +169,30 @@ function invRot(x, y, z, e, out) {
 }
 const RAD = Math.PI / 180;
 
-// The JS twin of the generated shader. Same order, same math.
-function sceneSDF(nodes, x, y, z) {
-  let d = 1e9;
+// The JS twin of the generated shader. Same order, same math. Takes a plan
+// (see buildPlan): each body folds on its own running distance, and the
+// bodies meet in a plain min so nothing blends across the boundary.
+function sceneSDF(plan, x, y, z) {
+  let out = 1e9;
   const q = [0, 0, 0], e = [0, 0, 0];
-  for (let i = 0; i < nodes.length; i++) {
-    const n = nodes[i];
-    if (!n.on) continue;
-    let px = n.mx ? Math.abs(x) : x;
-    let py = n.my ? Math.abs(y) : y;
-    let pz = n.mz ? Math.abs(z) : z;
-    e[0] = n.r[0] * RAD; e[1] = n.r[1] * RAD; e[2] = n.r[2] * RAD;
-    invRot(px - n.p[0], py - n.p[1], pz - n.p[2], e, q);
-    const di = PRIMS[n.t].js(q, n.d, n.round || 0);
-    if (n.op === 'add') d = smin(d, di, n.k);
-    else if (n.op === 'cut') d = smax(d, -di, n.k);
-    else d = smax(d, di, n.k);
+  for (let g = 0; g < plan.length; g++) {
+    const list = plan[g].nodes;
+    let d = 1e9;
+    for (let i = 0; i < list.length; i++) {
+      const n = list[i];
+      let px = n.mx ? Math.abs(x) : x;
+      let py = n.my ? Math.abs(y) : y;
+      let pz = n.mz ? Math.abs(z) : z;
+      e[0] = n.r[0] * RAD; e[1] = n.r[1] * RAD; e[2] = n.r[2] * RAD;
+      invRot(px - n.p[0], py - n.p[1], pz - n.p[2], e, q);
+      const di = PRIMS[n.t].js(q, n.d, n.round || 0);
+      if (n.op === 'add') d = smin(d, di, n.k);
+      else if (n.op === 'cut') d = smax(d, -di, n.k);
+      else d = smax(d, di, n.k);
+    }
+    if (d < out) out = d;
   }
-  return d;
+  return out;
 }
 
 // ---------- axis-aligned bounds of everything that adds material ----------
