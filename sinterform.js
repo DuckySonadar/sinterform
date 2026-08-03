@@ -20,7 +20,8 @@ const MAXN = 32;                      // uniform slots: 3 vec4 per shape
 // refers to it. Samples are one byte each: 0..255 across +/-`range` mm, which
 // is ~0.06 mm at the 8 mm range the exporter uses -- far finer than the grid
 // spacing, so the quantisation is never the limit.
-let field = null;        // { nx, ny, nz, box:[hx,hy,hz], range, data, tex }
+const MAXFIELDS = 4;     // one 3D texture each; the shader declares this many
+let fields = [];         // [{ name, nx, ny, nz, box:[hx,hy,hz], range, data, tex }]
 
 function decodeField(f) {
   if (!f || !f.data) return null;
@@ -30,8 +31,8 @@ function decodeField(f) {
   const need = f.nx * f.ny * f.nz;
   if (data.length !== need)
     throw new Error(`field is ${data.length} bytes, expected ${need}`);
-  return { nx: f.nx, ny: f.ny, nz: f.nz, box: f.box.slice(),
-           range: f.range, data, tex: null };
+  return { name: String(f.name || 'Baked'), nx: f.nx, ny: f.ny, nz: f.nz,
+           box: f.box.slice(), range: f.range, data, tex: null };
 }
 // Chunked, because fromCharCode(...half a million bytes) overflows the call
 // stack. Cached, because the samples never change once loaded and this runs on
@@ -43,15 +44,14 @@ function encodeField(f) {
       s += String.fromCharCode.apply(null, f.data.subarray(i, i + 8192));
     f.b64 = btoa(s);
   }
-  return { nx: f.nx, ny: f.ny, nz: f.nz, box: f.box, range: f.range,
-           data: f.b64 };
+  return { name: f.name, nx: f.nx, ny: f.ny, nz: f.nz, box: f.box,
+           range: f.range, data: f.b64 };
 }
 
 // Trilinear sample in the field's own local frame. Outside the grid this
 // returns the nearest edge sample, and `pField` unions that with the box so
 // the result stays a safe under-estimate for the marcher.
-function sampleField(x, y, z) {
-  const f = field;
+function sampleField(f, x, y, z) {
   if (!f) return 1e9;
   const gx = (x + f.box[0]) / (2 * f.box[0]) * (f.nx - 1);
   const gy = (y + f.box[1]) / (2 * f.box[1]) * (f.ny - 1);
@@ -214,27 +214,30 @@ const PRIMS = {
     // the sampler clamps to the edge, which would read as solid forever, so
     // the box distance is maxed in: outside, the box wins and the marcher
     // still converges; inside, the sampled field does.
-    name: 'Field', fn: 'pField', round: false, baked: true,
+    name: 'Baked', fn: 'pFieldS', round: false, baked: true,
     dims: [],
     def: [0, 0, 0],
-    glsl: `float pField(vec3 p, vec3 d, float r){
+    // GLSL ES 3.0 allows a sampler as a function parameter, so one function
+    // serves every slot and the generated call names its slot literally.
+    glsl: `float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
   vec3 q = abs(p) - d;
   float box = length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
   if (d.x <= 0.0) return 1e9;
   // the grid is stored with z fastest, so the texture is nz wide by ny by nx
   // and the lookup is (z, y, x), not (x, y, z)
   vec3 uvw = (p + d)/(2.0*d);
-  float v = (texture(uField, clamp(uvw.zyx, 0.0, 1.0)).r*2.0 - 1.0)*r;
+  float v = (texture(s, clamp(uvw.zyx, 0.0, 1.0)).r*2.0 - 1.0)*r;
   return max(v, box);
 }`,
-    js: (p, d) => {
-      if (!field) return 1e9;
+    js: (p, d, r, n) => {
+      const f = fields[(n && n.fi) || 0];
+      if (!f) return 1e9;
       const q = [Math.abs(p[0]) - d[0], Math.abs(p[1]) - d[1],
                  Math.abs(p[2]) - d[2]];
       const box = Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0),
                              Math.max(q[2], 0))
                 + Math.min(Math.max(q[0], q[1], q[2]), 0);
-      return Math.max(sampleField(p[0], p[1], p[2]), box);
+      return Math.max(sampleField(f, p[0], p[1], p[2]), box);
     },
     ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
   }
@@ -281,7 +284,7 @@ function sceneSDF(plan, x, y, z) {
       let pz = n.mz ? Math.abs(z) : z;
       e[0] = n.r[0] * RAD; e[1] = n.r[1] * RAD; e[2] = n.r[2] * RAD;
       invRot(px - n.p[0], py - n.p[1], pz - n.p[2], e, q);
-      const di = PRIMS[n.t].js(q, n.d, n.round || 0);
+      const di = PRIMS[n.t].js(q, n.d, n.round || 0, n);
       if (n.op === 'add') d = smin(d, di, n.k);
       else if (n.op === 'cut') d = smax(d, -di, n.k);
       else d = smax(d, di, n.k);
