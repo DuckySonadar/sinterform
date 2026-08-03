@@ -6,6 +6,72 @@
 // ======================================================================
 const MAXN = 32;                      // uniform slots: 3 vec4 per shape
 
+// ======================================================================
+// baked fields
+// ======================================================================
+// A shape the editor cannot describe with primitives -- the flexi fish, whose
+// body is swept from NURBS curves -- arrives instead as its distance field,
+// sampled on a grid. That is enough to cut against, blend with and mesh, which
+// is the whole reason to want it here: a joint tool has to be positioned
+// against the body it will cut, not against a guess at it.
+//
+// One field per document. It lives on the document rather than inside a node,
+// so undo snapshots and the shape list stay small, and a node of type `field`
+// refers to it. Samples are one byte each: 0..255 across +/-`range` mm, which
+// is ~0.06 mm at the 8 mm range the exporter uses -- far finer than the grid
+// spacing, so the quantisation is never the limit.
+let field = null;        // { nx, ny, nz, box:[hx,hy,hz], range, data, tex }
+
+function decodeField(f) {
+  if (!f || !f.data) return null;
+  const bin = atob(f.data);
+  const data = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+  const need = f.nx * f.ny * f.nz;
+  if (data.length !== need)
+    throw new Error(`field is ${data.length} bytes, expected ${need}`);
+  return { nx: f.nx, ny: f.ny, nz: f.nz, box: f.box.slice(),
+           range: f.range, data, tex: null };
+}
+// Chunked, because fromCharCode(...half a million bytes) overflows the call
+// stack. Cached, because the samples never change once loaded and this runs on
+// every save -- which is every drag of every slider.
+function encodeField(f) {
+  if (!f.b64) {
+    let s = '';
+    for (let i = 0; i < f.data.length; i += 8192)
+      s += String.fromCharCode.apply(null, f.data.subarray(i, i + 8192));
+    f.b64 = btoa(s);
+  }
+  return { nx: f.nx, ny: f.ny, nz: f.nz, box: f.box, range: f.range,
+           data: f.b64 };
+}
+
+// Trilinear sample in the field's own local frame. Outside the grid this
+// returns the nearest edge sample, and `pField` unions that with the box so
+// the result stays a safe under-estimate for the marcher.
+function sampleField(x, y, z) {
+  const f = field;
+  if (!f) return 1e9;
+  const gx = (x + f.box[0]) / (2 * f.box[0]) * (f.nx - 1);
+  const gy = (y + f.box[1]) / (2 * f.box[1]) * (f.ny - 1);
+  const gz = (z + f.box[2]) / (2 * f.box[2]) * (f.nz - 1);
+  const cl = (v, n) => Math.min(Math.max(v, 0), n - 1);
+  const x0 = Math.floor(cl(gx, f.nx)), y0 = Math.floor(cl(gy, f.ny)),
+        z0 = Math.floor(cl(gz, f.nz));
+  const x1 = Math.min(x0 + 1, f.nx - 1), y1 = Math.min(y0 + 1, f.ny - 1),
+        z1 = Math.min(z0 + 1, f.nz - 1);
+  const tx = cl(gx, f.nx) - x0, ty = cl(gy, f.ny) - y0, tz = cl(gz, f.nz) - z0;
+  const at = (i, j, k) => f.data[(i * f.ny + j) * f.nz + k];
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const c00 = lerp(at(x0, y0, z0), at(x1, y0, z0), tx);
+  const c10 = lerp(at(x0, y1, z0), at(x1, y1, z0), tx);
+  const c01 = lerp(at(x0, y0, z1), at(x1, y0, z1), tx);
+  const c11 = lerp(at(x0, y1, z1), at(x1, y1, z1), tx);
+  const c = lerp(lerp(c00, c10, ty), lerp(c01, c11, ty), tz);
+  return (c / 255 * 2 - 1) * f.range;
+}
+
 const PRIMS = {
   sphere: {
     name: 'Sphere', fn: 'pSphere', round: false,
@@ -141,6 +207,36 @@ const PRIMS = {
     glsl: 'float pPlane(vec3 p, vec3 d, float r){ return p.z; }',
     js: p => p[2],
     ext: () => [1e4, 1e4, 1e4]
+  },
+  field: {
+    // `d` is the grid's half-extent in mm and `r` its quantisation range, so
+    // this needs no uniform of its own beyond the texture. Outside the grid
+    // the sampler clamps to the edge, which would read as solid forever, so
+    // the box distance is maxed in: outside, the box wins and the marcher
+    // still converges; inside, the sampled field does.
+    name: 'Field', fn: 'pField', round: false, baked: true,
+    dims: [],
+    def: [0, 0, 0],
+    glsl: `float pField(vec3 p, vec3 d, float r){
+  vec3 q = abs(p) - d;
+  float box = length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+  if (d.x <= 0.0) return 1e9;
+  // the grid is stored with z fastest, so the texture is nz wide by ny by nx
+  // and the lookup is (z, y, x), not (x, y, z)
+  vec3 uvw = (p + d)/(2.0*d);
+  float v = (texture(uField, clamp(uvw.zyx, 0.0, 1.0)).r*2.0 - 1.0)*r;
+  return max(v, box);
+}`,
+    js: (p, d) => {
+      if (!field) return 1e9;
+      const q = [Math.abs(p[0]) - d[0], Math.abs(p[1]) - d[1],
+                 Math.abs(p[2]) - d[2]];
+      const box = Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0),
+                             Math.max(q[2], 0))
+                + Math.min(Math.max(q[0], q[1], q[2]), 0);
+      return Math.max(sampleField(p[0], p[1], p[2]), box);
+    },
+    ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
   }
 };
 const PRIM_KEYS = Object.keys(PRIMS);
