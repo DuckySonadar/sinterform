@@ -1,3 +1,23 @@
+/* SinterForm - a signed-distance geometry kernel
+ * Copyright (c) 2026 DuckySonadar
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Primitives, boolean operations with smooth blends, bodies, baked distance
+ * fields, GLSL sources for a raymarcher, a surface-nets mesher and binary STL
+ * output. No DOM, no WebGL, no storage: it computes geometry and hands it
+ * back. That is what makes it liftable into its own repository, and what
+ * keeps it usable from node -- which is how it gets tested.
+ *
+ * This block is the whole of it. Everything past the end of this script
+ * element is the MetaMeld(TM) application, which is separately licensed; the
+ * boundary is this file's seam, and it is load-bearing. Nothing in here may
+ * reach for `document`, `gl`, `localStorage` or the application's own state.
+ *
+ * (And nothing in here may spell the closing script tag, even inside a
+ * comment -- HTML ends the element on the literal characters and the page
+ * dies. This comment used to, which is how that was learnt.)
+ */
+(function (root) {
 "use strict";
 // ======================================================================
 // SDF core — every primitive is written twice, GLSL for the live preview
@@ -427,3 +447,24 @@ function meshToSTL(m, header) {
   }
   return new Blob([buf], { type: 'model/stl' });
 }
+
+// ----------------------------------------------------------------------
+// The public surface.
+//
+// `fields` is a live accessor rather than a plain value: it is the baked
+// field library, the kernel reads it when evaluating a `field` primitive,
+// and the application replaces the whole array on load and on import. A
+// copied reference would leave the two looking at different arrays, and the
+// symptom would be a baked shape that renders as the one you opened before.
+// ----------------------------------------------------------------------
+const SinterForm = {
+  MAXN, MAXFIELDS, PRIMS, PRIM_KEYS, OPS, RAD,
+  get fields() { return fields; },
+  set fields(v) { fields = v; },
+  decodeField, encodeField, sampleField,
+  smin, smax, invRot,
+  sceneSDF, sceneBounds, surfaceNets, meshToSTL
+};
+if (typeof module !== 'undefined' && module.exports) module.exports = SinterForm;
+root.SinterForm = SinterForm;
+})(typeof self !== 'undefined' ? self : globalThis);
