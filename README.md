@@ -321,17 +321,31 @@ direction.
 
 ### Joins and caps
 
-The ends of an open path are capped flat with the profile, which is what a
-sweep means; rounded ends would be a capsule and a different operation.
-Joints between segments are **rounded**, because two segments meeting at a
-convex corner leave a wedge that is past the end of one and before the start
-of the other — on a finely sampled curve that wedge is a whisker wide, and
-the answer inside it was wrong by the entire depth of the profile. Where the
-path doubles back on itself, the joint is a real end of the material and is
-capped.
+The **ends** of an open path are capped flat with the profile, which is what
+a sweep means; rounded ends would be a capsule and a different operation.
+Where the path doubles back on itself the joint is a real end of the
+material, so it caps too — retracing a path adds nothing.
+
+**Corners** take one of the two usual joins:
+
+| `join` | at a corner | reaches |
+| --- | --- | --- |
+| `'round'` (default) | the profile revolved about the vertex | exactly the profile radius, at any angle |
+| `'miter'` | both segments run on until their outer edges meet | `R / cos(turn/2)`, the true miter point |
+
+A miter runs on by `R·tan(turn/2)`, which is **zero on a straight joint** — so
+it costs nothing on a finely sampled curve and only bites where there is a
+real corner. It runs away as the corner closes, so `miterLimit` (default 4,
+in profile radii) clips it and the flat end becomes a bevel.
+
+Neither join may ever leave a gap, and getting that wrong is easy: treating
+anything sharper than a right angle as an end of the path — which this did at
+first — caps both segments flat and leaves nothing filling the wedge between
+them. On a 120° corner with a 6 mm profile, material reached 0.05 mm past the
+vertex instead of 6.
 
 ```
-node check-sweep.mjs      # 36 assertions
+node check-sweep.mjs      # 43 assertions
 ```
 
 ## Inlining it into HTML

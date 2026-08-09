@@ -91,6 +91,8 @@ function profileRadius(profile) {
  *   opts.scale    a number, a function of t in [0, 1] by arc length, or an
  *                 array of one factor per path point
  *   opts.z        the height the path sits at (default 0)
+ *   opts.join     'round' (default) or 'miter' at sharp corners
+ *   opts.miterLimit  how far a miter may run on, in profile radii (default 4)
  *
  * Returns f(x, y, z) -> mm, carrying .bounds, .arcLength and .segments.
  */
@@ -138,13 +140,38 @@ function along(path, profile, opts) {
     const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
     tan.push([dx / L, dy / L, L]);
   }
-  // Does the path carry on through this joint, or turn back on itself? A
-  // joint the path continues through is interior to the material and must
-  // not be capped. One it doubles back at is a real end of the material and
-  // must be, or the field reports the depth of the profile where the surface
-  // is a hair away. Ninety degrees is the line: past it the neighbour no
-  // longer covers what lies beyond.
-  const turns = (i, j) => tan[i][0] * tan[j][0] + tan[i][1] * tan[j][1] < 0;
+  // Does the path carry on through this joint, or double back on itself?
+  //
+  // A joint the path continues through is interior to the material: capping
+  // it puts a face inside the solid. One the path reverses at is a real end,
+  // and must be capped or the field reports the depth of the profile where
+  // the surface is a hair away.
+  //
+  // Only a true reversal counts. Taking ninety degrees as the line -- which
+  // this did at first -- leaves a notch at every corner sharper than that:
+  // both segments cap flat, and nothing fills the wedge between them. On a
+  // 120 degree corner with a 6 mm profile, material reached 0.05 mm past the
+  // vertex instead of 6.
+  const dotOf = (i, j) => tan[i][0] * tan[j][0] + tan[i][1] * tan[j][1];
+  const reverses = (i, j) => dotOf(i, j) < -0.999999;
+
+  // Sharp corners take one of the two usual joins.
+  //
+  //   round   the profile revolved about the vertex. The outer corner is
+  //           rounded off at the profile's own radius.
+  //   miter   both segments run on until their outer edges meet, giving a
+  //           point. The run is R*tan(turn/2), which is zero on a straight
+  //           joint -- so this costs nothing on a finely sampled curve and
+  //           only bites where there is a real corner -- and runs away as
+  //           the corner closes, hence the limit. Past it, this falls back
+  //           to round rather than leaving anything unfilled.
+  const join = opts.join === 'miter' ? 'miter' : 'round';
+  const miterLimit = opts.miterLimit === undefined ? 4 : opts.miterLimit;
+  const runOn = (i, j, s) => {
+    if (join !== 'miter' || reverses(i, j)) return 0;
+    const phi = Math.acos(Math.min(Math.max(dotOf(i, j), -1), 1));
+    return Math.min(R * s * Math.tan(phi / 2), R * s * miterLimit);
+  };
 
   const seg = [];
   let sMax = 0;
@@ -161,14 +188,22 @@ function along(path, profile, opts) {
     // stayed right, so it looked fine until a mesher interpolated a zero
     // crossing against those values and put the surface in the wrong place.
     const first = i === 0, lastSeg = i === last - 1;
-    const capA = (!closed && first) || turns((first ? last - 1 : i - 1), i);
-    const capB = (!closed && lastSeg) || turns(i, (lastSeg ? 0 : i + 1));
+    const pi = first ? last - 1 : i - 1, ni = lastSeg ? 0 : i + 1;
+    const e0 = (!closed && first) ? 0 : runOn(pi, i, sA);
+    const e1 = (!closed && lastSeg) ? 0 : runOn(i, ni, sB);
+    // A mitered end is capped flat where it stops, which is what makes the
+    // corner a point rather than a rounded nub. That face is buried inside
+    // the neighbour it ran on into, so it is never the nearest boundary and
+    // costs nothing -- unlike capping two segments that merely abut. Where
+    // the miter limit clipped the run-on, the flat cap is the bevel.
+    const capA = (!closed && first) || reverses(pi, i) || e0 > 1e-9;
+    const capB = (!closed && lastSeg) || reverses(i, ni) || e1 > 1e-9;
     // The surface of a tapered sweep is slanted by this much, and the
     // profile's distance is measured across the sweep rather than square to
     // that slant. Dividing by the secant puts it back to a safe bound.
     const slope = L > 0 ? R * Math.abs(sB - sA) / L : 0;
     seg.push({ ax: a[0], ay: a[1], tx: dx / L, ty: dy / L, L, sA, sB, capA, capB,
-               taper: Math.sqrt(1 + slope * slope) });
+               e0, e1, taper: Math.sqrt(1 + slope * slope) });
   }
 
   const f = function (x, y, z) {
@@ -181,7 +216,8 @@ function along(path, profile, opts) {
       const proj = px * S.tx + py * S.ty;
       const t = proj < 0 ? 0 : proj > S.L ? 1 : proj / S.L;
       // outside this segment's own span, and which end that is
-      const oStart = -proj, oEnd = proj - S.L;
+      // a miter runs each segment on past its joint; a round join does not
+      const oStart = -(proj + S.e0), oEnd = proj - (S.L + S.e1);
       const out = oStart > oEnd ? oStart : oEnd;
       const capThis = oStart > oEnd ? S.capA : S.capB;
       const capped = Math.max(S.capA ? oStart : -1e30, S.capB ? oEnd : -1e30);

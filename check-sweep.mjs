@@ -233,6 +233,98 @@ function naive(path, profile, closed) {
 }
 
 // ======================================================================
+console.log('\n--- sharp corners: round and miter ---');
+{
+  const R = 6;
+  const corner = (turn, join) => {
+    const th = turn * Math.PI / 180;
+    return SW.along([[-40, 0], [0, 0], [40 * Math.cos(th), 40 * Math.sin(th)]],
+                    P.circle(R), { join });
+  };
+  // how far material reaches along the outward bisector of the corner
+  const reach = (f, turn) => {
+    const bis = turn * Math.PI / 360 - Math.PI / 2;
+    let d = 0;
+    for (let t = 0.01; t < R * 10; t += 0.01) {
+      if (f(t * Math.cos(bis), t * Math.sin(bis), 0) < 0) d = t; else break;
+    }
+    return d;
+  };
+  let notch = 0;
+  for (const turn of [15, 45, 90, 120, 150, 170]) {
+    // A round join is the profile revolved about the vertex, so it reaches
+    // exactly the profile's radius whatever the corner does.
+    if (Math.abs(reach(corner(turn, 'round'), turn) - R) > 0.02) notch++;
+  }
+  ok(notch === 0, 'a round join reaches exactly the profile radius at every corner');
+  // This is the one that was wrong: treating anything sharper than a right
+  // angle as an end of the path left both segments capped flat and nothing
+  // filling the wedge between them.
+  ok(reach(corner(120, 'round'), 120) > R - 0.02
+     && reach(corner(150, 'round'), 150) > R - 0.02,
+     'and does not notch at corners sharper than a right angle');
+
+  let off = 0;
+  for (const turn of [15, 45, 90, 120]) {
+    const want = R / Math.cos(turn * Math.PI / 360);   // where the outer edges meet
+    if (Math.abs(reach(corner(turn, 'miter'), turn) - want) > 0.03) off++;
+  }
+  ok(off === 0, 'a miter join runs on to exactly where the outer edges meet, R/cos(turn/2)');
+
+  // A miter runs away as the corner closes, so it has to be limited.
+  const acute = 176;
+  const unlimited = R / Math.cos(acute * Math.PI / 360);
+  const th = acute * Math.PI / 180;
+  const lim = SW.along([[-40, 0], [0, 0], [40 * Math.cos(th), 40 * Math.sin(th)]],
+                       P.circle(R), { join: 'miter', miterLimit: 3 });
+  const got = reach(lim, acute);
+  ok(got < 3 * R + 0.5 && got > R,
+     `and is limited: ${got.toFixed(1)} mm rather than the ${unlimited.toFixed(0)} mm `
+     + `an unlimited miter wants (limit 3 radii, bevelled past it)`);
+
+  // A straight joint has no corner to treat, so the two agree exactly.
+  const straight = (join) => SW.along([[-30, 0], [0, 0], [30, 0]], P.circle(R), { join });
+  let worst = 0;
+  const a = straight('round'), b = straight('miter');
+  for (let i = 0; i < 20000; i++) {
+    const p = [span(45), span(20), span(20)];
+    worst = Math.max(worst, Math.abs(a(...p) - b(...p)));
+  }
+  ok(worst < 1e-9, `on a straight joint the two joins are identical `
+    + `(${worst.toExponential(1)} mm) — a miter costs nothing on a sampled curve`);
+}
+{
+  // both joins have to survive being meshed
+  const sq = [[-20, -20], [20, -20], [20, 20], [-20, 20]];
+  for (const join of ['round', 'miter']) {
+    const f = SW.along(sq, P.rect(7, 9, 1), { closed: true, join });
+    const res = 0.5, pad = 2 * res, B = f.bounds;
+    const lo = B.lo.map(v => v - pad);
+    const n = [0, 1, 2].map(i => Math.ceil((B.hi[i] - B.lo[i] + 2 * pad) / res) + 1);
+    const vol = new Float32Array(n[0] * n[1] * n[2]);
+    let k = 0;
+    for (let i = 0; i < n[0]; i++)
+      for (let j = 0; j < n[1]; j++)
+        for (let m = 0; m < n[2]; m++)
+          vol[k++] = f(lo[0] + i * res, lo[1] + j * res, lo[2] + m * res);
+    const mesh = SF.surfaceNets(vol, n[0], n[1], n[2], lo[0], lo[1], lo[2], res);
+    const nt = mesh.indices.length / 3;
+    const edges = new Map();
+    for (let t = 0; t < nt; t++) {
+      const A = mesh.indices[3 * t], B2 = mesh.indices[3 * t + 1], C = mesh.indices[3 * t + 2];
+      for (const [u, v] of [[A, B2], [B2, C], [C, A]]) {
+        const key = u < v ? `${u}_${v}` : `${v}_${u}`;
+        edges.set(key, (edges.get(key) || 0) + 1);
+      }
+    }
+    let bad = 0;
+    for (const v of edges.values()) if (v !== 2) bad++;
+    ok(nt > 500 && bad === 0, `a ${join}-joined square frame meshes watertight `
+      + `(${nt.toLocaleString()} triangles)`);
+  }
+}
+
+// ======================================================================
 console.log('\n--- open and closed paths, and sketches ---');
 {
   const S = new Sketch();
