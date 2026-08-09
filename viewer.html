@@ -1,0 +1,194 @@
+<!doctype html>
+<!-- SinterForm viewer — open this file directly, no server needed.
+     Copyright (c) 2026 DuckySonadar · SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SinterForm viewer</title>
+<style>
+  :root { --bg:#0d0f12; --panel:#14171c; --line:#242830; --dim:#7d8794;
+          --ink:#e9edf2; --hot:#e8974a; --cool:#5aa9e6; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+              font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; overflow:hidden; }
+  #wrap { display:flex; height:100%; }
+  /* flex-basis 0 with min-width 0, so the canvas's own width/height
+     attributes never feed back into layout — set them and the element grows,
+     which grows the rect, which grows them again. */
+  #view { flex:1 1 0; min-width:0; width:100%; height:100%; display:block;
+          touch-action:none; cursor:grab; }
+  #view:active { cursor:grabbing; }
+  #side { flex:0 0 264px; border-left:1px solid var(--line); background:var(--panel);
+          padding:12px; overflow-y:auto; display:flex; flex-direction:column; gap:12px; }
+  h1 { font-size:13px; margin:0; letter-spacing:.04em; }
+  h1 small { color:var(--dim); font-weight:400; display:block; margin-top:3px; letter-spacing:0; }
+  .grp { display:flex; flex-direction:column; gap:5px; }
+  .lbl { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.07em; }
+  .seg { display:flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .seg button { flex:1; background:transparent; border:0; color:var(--dim); padding:7px 4px;
+                font:inherit; cursor:pointer; }
+  .seg button.on { background:var(--hot); color:#14171c; }
+  .seg button.on.cool { background:var(--cool); }
+  select, input[type=range] { width:100%; }
+  select { background:#0e1116; color:var(--ink); border:1px solid var(--line);
+           border-radius:6px; padding:6px; font:inherit; }
+  #stat { color:var(--dim); font-size:11.5px; white-space:pre-wrap; line-height:1.6; }
+  #err { color:#ff7b6b; font-size:11.5px; white-space:pre-wrap; display:none; }
+  .hint { color:var(--dim); font-size:11px; border-top:1px solid var(--line); padding-top:10px; }
+  .swatch { display:inline-block; width:8px; height:8px; border-radius:2px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="view"></canvas>
+  <div id="side">
+    <h1>SinterForm viewer<small>a window onto the kernel</small></h1>
+
+    <div class="grp">
+      <div class="lbl">Draw with</div>
+      <div class="seg" id="mode">
+        <button data-m="raymarch" class="on">GLSL · GPU</button>
+        <button data-m="mesh" class="cool">JS · mesh</button>
+      </div>
+      <div id="stat"></div>
+      <div id="err"></div>
+    </div>
+
+    <div class="grp">
+      <div class="lbl">Scene</div>
+      <select id="scene"></select>
+    </div>
+
+    <div class="grp">
+      <div class="lbl">Mesh resolution <span id="resv">0.6 mm</span></div>
+      <input type="range" id="res" min="0.2" max="2" step="0.1" value="0.6">
+    </div>
+
+    <div class="hint">
+      <b>Both modes draw the same scene.</b> <span class="swatch" style="background:var(--hot)"></span>
+      GLSL runs <code>glsl.js</code> on the GPU;
+      <span class="swatch" style="background:var(--cool)"></span> mesh runs the JS twins in
+      <code>sinterform.js</code> through <code>surfaceNets</code>. They are meant to be the
+      same shape — flip between them and any drift is visible.
+      <br><br>Drag to orbit · scroll to zoom.
+    </div>
+  </div>
+</div>
+
+<script src="sinterform.js"></script>
+<script src="glsl.js"></script>
+<script src="viewer.js"></script>
+<script>
+"use strict";
+const N = SinterView.node;
+
+// Scenes chosen for debugging rather than for looking nice. The first is the
+// one that earns its keep: every primitive at once, so a broken one is
+// obvious at a glance instead of being found by whichever model happened to
+// use it.
+const SCENES = {
+  'every primitive': () => {
+    const keys = SinterForm.PRIM_KEYS.filter(k => k !== 'plane' && k !== 'field');
+    const cols = 5, pitch = 46;
+    return [{ id: 0, nodes: keys.map((k, i) => N(k, {
+      p: [(i % cols - (cols - 1) / 2) * pitch,
+          (Math.floor(i / cols) - 1) * pitch, 20]
+    })) }];
+  },
+  'blend sweep': () => [{ id: 0, nodes: [0, 2, 5, 9, 14].flatMap((k, i) => {
+    const x = (i - 2) * 44;
+    return [N('sphere', { p: [x - 9, 0, 20], d: [13, 0, 0] }),
+            N('box',    { p: [x + 11, 0, 20], d: [20, 20, 20], k })];
+  }) }],
+  'booleans': () => [{ id: 0, nodes: [
+    N('box',      { p: [0, 0, 20], d: [34, 34, 34], round: 3 }),
+    N('sphere',   { op: 'cut', p: [0, 0, 37], d: [20, 0, 0], k: 2 }),
+    N('cylinder', { op: 'cut', p: [0, 0, 20], r: [90, 0, 0], d: [7, 60, 0] }),
+    N('cylinder', { op: 'cut', p: [0, 0, 20], d: [7, 60, 0] })
+  ] }],
+  'two bodies, no blend across': () => [
+    { id: 0, nodes: [N('sphere', { p: [-14, 0, 18], d: [17, 0, 0], k: 9 })] },
+    { id: 1, nodes: [N('box', { p: [16, 0, 18], d: [26, 26, 26], k: 9 })] }
+  ],
+  'ellipsoid — the loose one': () => [{ id: 0, nodes: [
+    N('ellipsoid', { p: [0, 0, 22], d: [64, 26, 34] })
+  ] }],
+  'ice cream': () => [{ id: 0, nodes: [
+    N('cone',      { p: [0, 0, 19], d: [3, 17, 44], round: 1 }),
+    N('ellipsoid', { p: [0, 0, 50.5], d: [35, 35, 28.5] }),
+    N('torus',     { p: [0, 0, 44.5], d: [16.5, 5, 0], k: 1.25 }),
+    N('plane',     { op: 'cut', p: [0, 0, 0], k: 2.75 })
+  ] }]
+};
+
+const cv = document.getElementById('view');
+const V = SinterView.attach(cv);
+const $ = id => document.getElementById(id);
+
+function size() {
+  const r = cv.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = Math.max(1, Math.round(r.width * dpr));
+  cv.height = Math.max(1, Math.round(r.height * dpr));
+  V.draw();
+}
+addEventListener('resize', size);
+
+function status() {
+  const v = V.view;
+  const bits = [`mode: ${v.mode === 'mesh' ? 'JS twins, meshed' : 'GLSL, raymarched'}`];
+  const shapes = v.plan.reduce((s, p) => s + p.nodes.length, 0);
+  bits.push(`${shapes} shape${shapes === 1 ? '' : 's'} · ${v.plan.length} bod${v.plan.length === 1 ? 'y' : 'ies'}`);
+  if (v.mode === 'mesh') bits.push(`${v.tris.toLocaleString()} triangles · ${v.meshMs} ms @ ${v.res} mm`);
+  else bits.push(`step ${SinterView.STEP} of the reported distance`);
+  $('stat').textContent = bits.join('\n');
+  $('err').style.display = v.lastError ? 'block' : 'none';
+  $('err').textContent = v.lastError || '';
+}
+
+function load(name) {
+  V.show(SCENES[name]());
+  V.frame();
+  status();
+}
+
+const sel = $('scene');
+for (const k of Object.keys(SCENES)) {
+  const o = document.createElement('option');
+  o.value = k; o.textContent = k; sel.appendChild(o);
+}
+sel.onchange = () => load(sel.value);
+
+$('mode').onclick = (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  [...$('mode').children].forEach(c => c.classList.toggle('on', c === b));
+  V.setMode(b.dataset.m);
+  status();
+};
+
+$('res').oninput = (e) => {
+  const r = parseFloat(e.target.value);
+  $('resv').textContent = r.toFixed(1) + ' mm';
+  V.setRes(r);
+  status();
+};
+
+// pointer: drag orbits, wheel zooms
+let down = false, lx = 0, ly = 0;
+cv.addEventListener('pointerdown', e => { down = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointerup', e => { down = false; });
+cv.addEventListener('pointermove', e => {
+  if (!down) return;
+  V.orbit((e.clientX - lx) * 0.008, (e.clientY - ly) * 0.006);
+  lx = e.clientX; ly = e.clientY;
+});
+cv.addEventListener('wheel', e => { e.preventDefault(); V.zoom(Math.exp(e.deltaY * 0.0012)); }, { passive: false });
+
+size();
+load(Object.keys(SCENES)[0]);
+window.__V = V;
+window.__ready = true;
+</script>
+</body>
+</html>
