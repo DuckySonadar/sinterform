@@ -89,9 +89,9 @@ const plan = [
 ```js
 sceneSDF(plan, x, y, z) → number
 ```
-Signed distance to the whole scene at a point, in mm. This is the JS twin of
-the GLSL the kernel also emits; the two are written side by side so they stay
-in step.
+Signed distance to the whole scene at a point, in mm. This is the JS side of
+each primitive; `glsl.js` holds the GLSL side, and `check-glsl.mjs` is what
+keeps the two in step now that they no longer share a file.
 
 ```js
 sceneBounds(nodes) → { lo: [x, y, z], hi: [x, y, z] } | null
