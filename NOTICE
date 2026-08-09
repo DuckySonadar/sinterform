@@ -1,0 +1,19 @@
+SinterForm — a signed-distance geometry kernel
+Copyright (c) 2026 DuckySonadar
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+This kernel was extracted from MetaMeld
+(https://github.com/DuckySonadar/mywebsiterepository-Iknowtotallyoriginal),
+which remains separately licensed. "MetaMeld" is a reserved trademark of that
+project and is not licensed with this software.

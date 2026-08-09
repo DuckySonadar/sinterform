@@ -1,1 +1,187 @@
-# sinterform
+# SinterForm
+
+A signed-distance geometry kernel for solid modelling: primitives, booleans
+with smooth blends, baked distance fields, a surface-nets mesher and binary
+STL output. About 470 lines of dependency-free JavaScript.
+
+It computes geometry and hands it back. There is no DOM in it, no WebGL, no
+storage, no state belonging to whatever is using it — which is what makes it
+runnable from node, testable without a browser, and liftable into a project
+that looks nothing like the one it grew up in.
+
+It was extracted from [MetaMeld][mm], a single-file SDF modeller for 3D
+printing, and that is still its main consumer: MetaMeld inlines this file into
+its one shipped HTML file at build time.
+
+[mm]: https://github.com/DuckySonadar/mywebsiterepository-Iknowtotallyoriginal
+
+## Conventions
+
+Fixed throughout, and worth reading before the API:
+
+- **Millimetres.** Every length — coordinates, dimensions, blend radii, mesh
+  resolution — is in millimetres. There is no unit setting.
+- **+Z is up.**
+- **z = 0 is the build plate.** Geometry below it is geometry below the plate;
+  the kernel will happily evaluate it, and a printer will not.
+- **Rotations are degrees**, as Euler angles applied Rz·Ry·Rx.
+- **Distances are signed**: negative inside the solid, zero on the surface,
+  positive outside.
+
+## Using it
+
+```js
+const SinterForm = require('./sinterform.js');   // or <script> it, see below
+```
+
+The file assigns `module.exports` when there is a `module`, and otherwise puts
+`SinterForm` on the global object. Nothing else — no ESM build, no bundler
+step, no `package.json` dependencies.
+
+### Shapes
+
+A **shape** is a plain object. Nothing is a class and nothing is validated;
+these are the fields the kernel reads:
+
+| field | meaning |
+| --- | --- |
+| `t` | primitive key — one of `PRIM_KEYS` |
+| `p` | `[x, y, z]` position, mm |
+| `r` | `[rx, ry, rz]` rotation, degrees |
+| `d` | dimensions, meaning set by the primitive (`PRIMS[t].dims`) |
+| `op` | `'add'`, `'cut'` or `'keep'` (intersect) |
+| `k` | blend radius in mm; `0` is a hard edge |
+| `round` | corner rounding in mm, on primitives with `PRIMS[t].round` |
+| `on` | `false` hides it from bounds; callers usually filter these out first |
+| `b` | which body it belongs to |
+| `mx`, `my`, `mz` | mirror across that axis (evaluates at `abs` of the coordinate) |
+| `fi` | which baked field, for `t: 'field'` |
+
+Shapes fold in order: each one is combined with the running distance so far,
+so a `cut` removes what is already there and the order of the list matters.
+
+### Bodies
+
+A **body** is one buildable part. Bodies fold onto their *own* running
+distance and then meet in a plain `min`, so nothing blends across the boundary
+between two parts that are meant to print separately.
+
+A **plan** — what `sceneSDF` takes — is that grouping made explicit:
+
+```js
+const plan = [
+  { id: 0, nodes: [ /* shapes of body 0 */ ] },
+  { id: 1, nodes: [ /* shapes of body 1 */ ] }
+];
+```
+
+### The API
+
+```js
+sceneSDF(plan, x, y, z) → number
+```
+Signed distance to the whole scene at a point, in mm. This is the JS twin of
+the GLSL the kernel also emits; the two are written side by side so they stay
+in step.
+
+```js
+sceneBounds(nodes) → { lo: [x, y, z], hi: [x, y, z] } | null
+```
+Axis-aligned bounds, in mm, of everything that *adds* material — takes a flat
+shape list, not a plan. `null` when nothing does. It returns `lo`/`hi`, not
+`x0`/`x1`.
+
+```js
+surfaceNets(vol, nx, ny, nz, ox, oy, oz, res) → { positions, indices }
+```
+Meshes a sampled grid. `vol` is a `Float32Array` of `nx*ny*nz` signed
+distances in `x`-major order (`vol[(i*ny + j)*nz + k]`), `o*` is the world
+position of sample `(0,0,0)` and `res` the spacing, all mm. Returns a
+`Float32Array` of positions and a `Uint32Array` of triangle indices. The
+cell-to-vertex map is kept sparse — at print resolution a dense one costs
+hundreds of megabytes to hold the ~1% of cells the surface crosses.
+
+```js
+meshToSTL(mesh, header) → Blob
+```
+Binary STL. `header` is truncated to the 80 bytes the format allows.
+
+```js
+smin(a, b, k) · smax(a, b, k)
+```
+Polynomial smooth min and max, the blend behind `k`. Both fall back to plain
+`Math.min`/`Math.max` when `k <= 0`.
+
+```js
+invRot(x, y, z, euler, out) → out
+```
+World → local for a shape rotated Rz·Ry·Rx. `euler` is in **radians** here
+(multiply degrees by the exported `RAD`); writes into `out` and returns it,
+because it runs once per shape per sample.
+
+### Tables
+
+`PRIMS` maps a key to a primitive: display `name`, its `dims` (label, min,
+max, step), defaults, a `glsl` source string, a `js` twin, and `ext` for
+bounds. `PRIM_KEYS` is its key list, `OPS` the boolean operations with
+labels, `MAXN` the shader's shape budget, and `RAD` is `π/180`.
+
+To add a primitive, add an entry with both a `glsl` and a `js` implementation.
+They must agree; a mismatch shows up as a preview that disagrees with the
+exported mesh.
+
+### Baked fields
+
+A shape too complicated to describe with primitives can arrive as its distance
+field instead, sampled on a grid — enough to cut against, blend with and mesh.
+Samples are one byte each across ±`range` mm.
+
+```js
+SinterForm.fields = [ /* field objects */ ];   // library, max MAXFIELDS
+decodeField(f) · encodeField(f) · sampleField(f, x, y, z)
+```
+
+**`fields` is a getter/setter pair, not a value.** The kernel reads it every
+time it evaluates a `field` primitive, and a consumer typically replaces the
+whole array when it loads or imports a document. Assign to
+`SinterForm.fields`; do not capture it into a local and expect writes through
+that local to be seen. A copied reference leaves the two sides looking at
+different arrays, and the symptom — a baked shape rendering as the one you
+opened before — is slow to trace back here.
+
+## Inlining it into HTML
+
+The kernel is written to survive being pasted between `<script>` tags, which
+is how MetaMeld ships as one file that opens from `file://`.
+
+That imposes one rule: **nothing in this file may spell a literal closing
+script tag, not even inside a comment.** HTML ends the element on those
+characters wherever they appear, and the page after it becomes text. This has
+happened once already. `check-kernel.mjs` asserts it.
+
+## Tests
+
+```
+node check-kernel.mjs             # checks sinterform.js
+node check-kernel.mjs some.html   # checks the <script id="sinterform"> in it
+```
+
+27 assertions, exit code 0 or 1. It refuses the kernel if it names anything
+browser-shaped, runs it under node with no DOM at all, and asks it for
+geometry whose answer is known.
+
+The HTML form is there so a project that inlines the kernel can check the file
+its build actually produced, using these assertions rather than a second copy
+of them that drifts.
+
+## Licence
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+If you redistribute this — including inlined into a larger file — §4 asks you
+to keep the attribution and include the licence. MetaMeld's build script does
+that automatically rather than relying on anyone remembering.
+
+The name *MetaMeld* is a reserved trademark of that project and is deliberately
+not part of this one; this kernel has no "Meld" in it so the boundary stays
+clean.

@@ -1,0 +1,132 @@
+/* Hold the SinterForm seam.
+ *
+ *     node check-kernel.mjs [path]
+ *
+ * With no argument it checks `sinterform.js` next to this file. Given a path
+ * ending in .html it pulls the kernel out of the `<script id="sinterform">`
+ * block instead, which is how MetaMeld checks the file its build produced --
+ * the assertions live here, in the kernel's own repository, and its consumer
+ * borrows them rather than keeping a second copy that can drift.
+ *
+ * What the kernel is for is being liftable: it does not touch the DOM, the GL
+ * context, storage, or any application's state. That property is invisible --
+ * nothing breaks the day someone reaches across it, and the application keeps
+ * working right up until the moment the kernel is lifted out and does not.
+ *
+ * So it is checked. This refuses the kernel if it names anything
+ * browser-shaped, runs it under node with no DOM at all, and asks it for some
+ * geometry whose answer is known.
+ *
+ * Exit code is 0 or 1, so it can be a CI step.
+ */
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join, relative } from 'path';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TARGET = process.argv[2] ? process.argv[2] : join(HERE, 'sinterform.js');
+const OPEN = '<script id="sinterform">';
+const CLOSE = '</' + 'script>';
+
+// Things the kernel may not name. `document` and `window` are the obvious
+// ones; `gl.` and `localStorage` are the ones that crept in last time.
+const FORBIDDEN = [
+  /\bdocument\s*\./, /\bwindow\s*\./, /\blocalStorage\b/, /\bgetElementById\b/,
+  /\baddEventListener\b/, /\bgl\s*\./, /\brequestAnimationFrame\b/,
+  /\bnavigator\s*\./, /\bfetch\s*\(/, /\balert\s*\(/, /\bprompt\s*\(/
+];
+
+let fail = 0;
+const ok = (cond, msg) => {
+  console.log(`  ${cond ? 'ok  ' : 'FAIL'}  ${msg}`);
+  if (!cond) fail++;
+};
+
+const src = readFileSync(TARGET, 'utf8');
+let kernel = src;
+if (TARGET.endsWith('.html')) {
+  const a = src.indexOf(OPEN);
+  if (a < 0) { console.error(`no ${OPEN} in ${TARGET}`); process.exit(1); }
+  const b = src.indexOf(CLOSE, a);
+  if (b < 0) { console.error(`unterminated ${OPEN} in ${TARGET}`); process.exit(1); }
+  kernel = src.slice(src.indexOf('\n', a) + 1, b);
+}
+
+console.log(`SinterForm kernel — ${kernel.split('\n').length} lines of `
+  + `${relative(process.cwd(), TARGET) || TARGET}\n`);
+
+// ---- 1. the seam holds ------------------------------------------------
+// Comments are stripped first: the header talks *about* the DOM, and a
+// checker that cannot tell prose from code is a checker nobody keeps.
+const code = kernel.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+for (const re of FORBIDDEN) {
+  const hit = code.match(re);
+  ok(!hit, `kernel does not use ${re.source.replace(/\\b|\\s\*/g, '')}`
+      + (hit ? ` — found ${JSON.stringify(hit[0])}` : ''));
+}
+// It also has to survive being inlined into one script element. A stray
+// closing tag -- even inside a comment -- ends the element early and takes
+// the whole page down with it.
+ok(!kernel.includes(CLOSE), 'kernel contains no closing script tag');
+
+// ---- 2. it runs with no browser at all --------------------------------
+const mod = { exports: {} };
+try {
+  new Function('module', kernel)(mod);
+} catch (e) {
+  console.log(`  FAIL  kernel throws under node: ${e.message}`);
+  process.exit(1);
+}
+const SF = mod.exports;
+ok(typeof SF === 'object' && SF.PRIMS, 'kernel exports a namespace via module.exports');
+
+// ---- 3. it computes the geometry it is supposed to --------------------
+const node = (over) => Object.assign(
+  { t: 'sphere', on: true, op: 'add', k: 0, b: 0, tg: null, fi: 0,
+    p: [0, 0, 0], r: [0, 0, 0], d: [10, 0, 0], round: 0,
+    mx: false, my: false, mz: false }, over);
+
+const near = (got, want, tol, what) =>
+  ok(Math.abs(got - want) < tol, `${what}: ${got.toFixed(4)} ≈ ${want}`);
+
+const sphere = [{ id: 0, nodes: [node({})] }];
+near(SF.sceneSDF(sphere, 0, 0, 0), -10, 1e-6, 'centre of a r=10 sphere is -10');
+near(SF.sceneSDF(sphere, 10, 0, 0), 0, 1e-6, 'its surface is 0');
+near(SF.sceneSDF(sphere, 25, 0, 0), 15, 1e-6, '15 mm outside is 15');
+
+// a hard cut has to remove material; a blended one has to round the seam
+const cut = [{ id: 0, nodes: [node({}), node({ op: 'cut', p: [10, 0, 0], d: [6, 0, 0] })] }];
+ok(SF.sceneSDF(cut, 9, 0, 0) > 0, 'a cut sphere is empty where the cutter was');
+ok(SF.sceneSDF(cut, -9, 0, 0) < 0, 'and still solid on the far side');
+
+// two bodies meet in a plain min and never blend into each other
+const two = [{ id: 0, nodes: [node({})] },
+             { id: 1, nodes: [node({ b: 1, p: [40, 0, 0] })] }];
+near(SF.sceneSDF(two, 20, 0, 0), 10, 1e-6, 'the gap between two bodies is unblended');
+
+// the mesher and the exporter still produce something of the right shape
+// {lo, hi} in mm, not {x0, x1} -- checked because I guessed wrong once
+const B = SF.sceneBounds([node({})]);
+ok(B && B.lo && B.hi, 'sceneBounds returns a {lo, hi} box');
+near(B.lo[0], -10, 1e-6, 'the box of a r=10 sphere starts at -10');
+near(B.hi[2], 10, 1e-6, 'and ends at +10');
+ok(SF.sceneBounds([node({ op: 'cut' })]) === null,
+   'a scene with nothing added has no bounds');
+ok(SF.PRIM_KEYS.length >= 8, `${SF.PRIM_KEYS.length} primitives registered`);
+ok(typeof SF.surfaceNets === 'function' && typeof SF.meshToSTL === 'function',
+   'mesher and STL writer are exported');
+
+// `fields` is a getter/setter pair, not a value. The application replaces the
+// whole array on load and on import; if the kernel handed out a copied
+// reference the two would drift, and the symptom -- a baked shape rendering
+// as the one you opened before -- is slow to trace back to here.
+const desc = Object.getOwnPropertyDescriptor(SF, 'fields');
+ok(desc && typeof desc.get === 'function' && typeof desc.set === 'function',
+   'fields is exported as a live accessor, not a copied reference');
+const probe = [{ name: 'probe' }];
+SF.fields = probe;
+ok(SF.fields === probe, 'and assigning to it is visible through the kernel');
+SF.fields = [];
+
+console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);
+process.exit(fail ? 1 : 0);

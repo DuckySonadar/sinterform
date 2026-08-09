@@ -1,0 +1,27 @@
+# Who wrote what.
+#
+# This repository's history was split out of MetaMeld with `git subtree
+# split`, so it carries that repository's identities: the GitHub web UI, two
+# differently-configured Macs, and Claude Code sessions running in the cloud.
+# They are all the same person. This file tells git so -- `git log`,
+# `git shortlog` and `git blame` read it and collapse the list.
+#
+# It changes how history is *displayed*, not the history itself. Nothing is
+# rewritten, no commit hash moves, and anyone who has already cloned is
+# unaffected. (GitHub's own contributor graph ignores .mailmap; this fixes
+# the command line and most tooling, which is where it is worth fixing.)
+#
+# The canonical form is the GitHub account plus GitHub's noreply address --
+# that is what links a commit to the account, and it keeps a personal email
+# out of a public repository.
+#
+# Format: Canonical Name <canonical@email>  Old Name <old@email>
+
+DuckySonadar <77309815+DuckySonadar@users.noreply.github.com> <josiahlindstrom@gmail.com>
+DuckySonadar <77309815+DuckySonadar@users.noreply.github.com> <Josiah@Users-MacBook-Pro.local>
+
+# Claude Code sessions committed under the tool's default identity. The work
+# was directed by the repository owner, so authorship is theirs; Claude stays
+# on the commits as a Co-Authored-By trailer, which is the accurate record and
+# is not affected by this file.
+DuckySonadar <77309815+DuckySonadar@users.noreply.github.com> Claude <noreply@anthropic.com>
