@@ -217,8 +217,9 @@ Sketch.prototype.param = function (v, o) {
   return e.id;
 };
 
-Sketch.prototype.line = function (a, b) {
-  const e = { k: KIND.LINE, id: this.ents.length, a, b };
+Sketch.prototype.line = function (a, b, o) {
+  const e = { k: KIND.LINE, id: this.ents.length, a, b,
+              construction: !!(o && o.construction) };
   this.ents.push(e);
   return e.id;
 };
@@ -229,6 +230,7 @@ Sketch.prototype.arc = function (c, rx, ry, phi, t0, t1, o) {
   const f = !!(o && o.fixed);
   const e = {
     k: KIND.ARC, id: this.ents.length, c,
+    construction: !!(o && o.construction),
     vrx: this._var(rx, f), vry: this._var(ry === undefined ? rx : ry, f),
     vphi: this._var(phi || 0, f),
     vt0: this._var(t0 === undefined ? 0 : t0, f),
@@ -259,7 +261,8 @@ Sketch.prototype.nurbs = function (ctrl, o) {
     for (let i = 0; i < p; i++) U[m + 1 + i] = 1;
   }
   const e = { k: KIND.NURBS, id: this.ents.length, ctrl: cp, w: ww, p, U, closed,
-              n: m - 1, base: ctrl.slice(), baseW: w.slice() };
+              n: m - 1, base: ctrl.slice(), baseW: w.slice(),
+              construction: !!o.construction };
   this.ents.push(e);
   return e.id;
 };
@@ -272,6 +275,16 @@ Sketch.prototype.fix = function (id, on) {
   else if (e.k === KIND.ARC) { set(e.vrx); set(e.vry); set(e.vphi); set(e.vt0); set(e.vt1); this.fix(e.c, on); }
   else if (e.k === KIND.LINE) { this.fix(e.a, on); this.fix(e.b, on); }
   else if (e.k === KIND.NURBS) e.base.forEach(c => this.fix(c, on));
+  return id;
+};
+
+// Scaffolding: geometry that constrains the drawing without being part of it.
+// A centreline, a bounding circle, an axis to measure an angle against --
+// every sketcher needs them, and a profile must not walk into one.
+Sketch.prototype.construction = function (id, on) {
+  const e = this.ents[id];
+  if (!e) throw new Error(`no entity ${id}`);
+  e.construction = on === undefined ? true : !!on;
   return id;
 };
 
@@ -496,6 +509,10 @@ const CONSTRAINTS = {
   } },
   radius: { n: 1, f(S, x, c, out) {
     out[0] = x[S.ents[c.a.e].vrx] - c.v;
+  } },
+  // An ellipse has two semi-axes; `radius` only ever reached the first.
+  radiusY: { n: 1, f(S, x, c, out) {
+    out[0] = x[S.ents[c.a.e].vry] - c.v;
   } },
   angle: { n: 1, f(S, x, c, out) {
     const d1 = S._dir(x, c.a), d2 = S._dir(x, c.b);
@@ -791,16 +808,16 @@ Sketch.prototype.get = function (id) {
     case KIND.PARAM:
       return { id, kind: e.k, dead: !!e.dead, t: this.x[e.v], fixed: F(e.v) };
     case KIND.LINE:
-      return { id, kind: e.k, dead: !!e.dead, a: e.a, b: e.b,
+      return { id, kind: e.k, dead: !!e.dead, construction: !!e.construction, a: e.a, b: e.b,
                from: this.ptOf(this.x, e.a), to: this.ptOf(this.x, e.b) };
     case KIND.ARC:
-      return { id, kind: e.k, dead: !!e.dead, c: e.c,
+      return { id, kind: e.k, dead: !!e.dead, construction: !!e.construction, c: e.c,
                centre: this.ptOf(this.x, e.c),
                rx: this.x[e.vrx], ry: this.x[e.vry], phi: this.x[e.vphi],
                t0: this.x[e.vt0], t1: this.x[e.vt1],
                circular: Math.abs(this.x[e.vrx] - this.x[e.vry]) < 1e-9 };
     case KIND.NURBS:
-      return { id, kind: e.k, dead: !!e.dead, ctrl: e.base.slice(),
+      return { id, kind: e.k, dead: !!e.dead, construction: !!e.construction, ctrl: e.base.slice(),
                weights: e.baseW.slice(), degree: e.p, closed: e.closed,
                domain: [e.U[e.p], e.U[e.n + 1]] };
     default:
@@ -916,12 +933,14 @@ Sketch.prototype.toJSON = function () {
       switch (e.k) {
         case KIND.POINT: return { kind: e.k, x: g.x, y: g.y, fixed: g.fixed, dead: g.dead };
         case KIND.PARAM: return { kind: e.k, t: g.t, fixed: g.fixed, dead: g.dead };
-        case KIND.LINE: return { kind: e.k, a: e.a, b: e.b, dead: g.dead };
+        case KIND.LINE: return { kind: e.k, a: e.a, b: e.b, dead: g.dead,
+                                 construction: g.construction };
         case KIND.ARC: return { kind: e.k, c: e.c, rx: g.rx, ry: g.ry, phi: g.phi,
-                                t0: g.t0, t1: g.t1,
+                                t0: g.t0, t1: g.t1, construction: g.construction,
                                 fixed: this.fixed[e.vrx], dead: g.dead };
         case KIND.NURBS: return { kind: e.k, ctrl: g.ctrl, weights: g.weights,
-                                  degree: g.degree, closed: g.closed, dead: g.dead };
+                                  degree: g.degree, closed: g.closed, dead: g.dead,
+                                  construction: g.construction };
         default: return { kind: e.k, dead: g.dead };
       }
     }),
@@ -938,11 +957,12 @@ Sketch.fromJSON = function (o) {
     switch (s.kind) {
       case KIND.POINT: id = S.point(s.x, s.y, { fixed: s.fixed }); break;
       case KIND.PARAM: id = S.param(s.t, { fixed: s.fixed }); break;
-      case KIND.LINE: id = S.line(s.a, s.b); break;
+      case KIND.LINE: id = S.line(s.a, s.b, { construction: s.construction }); break;
       case KIND.ARC: id = S.arc(s.c, s.rx, s.ry, s.phi, s.t0, s.t1,
-                                { fixed: s.fixed }); break;
+                                { fixed: s.fixed, construction: s.construction }); break;
       case KIND.NURBS: id = S.nurbs(s.ctrl, { weights: s.weights, degree: s.degree,
-                                              closed: s.closed }); break;
+                                              closed: s.closed,
+                                              construction: s.construction }); break;
       default: throw new Error(`unknown entity kind: ${s.kind}`);
     }
     if (s.dead) S.ents[id].dead = true;
@@ -972,7 +992,10 @@ const CURVE_KINDS = [KIND.LINE, KIND.ARC, KIND.NURBS];
 // list of { id, reversed }. Ends that touch within `tol` are the same node.
 Sketch.prototype.loops = function (tol) {
   tol = tol || 1e-6;
-  const curves = this.ents.filter(e => !e.dead && CURVE_KINDS.indexOf(e.k) >= 0);
+  // Construction geometry is scaffolding: it constrains the drawing without
+  // being part of it, so it must not be walked into a loop.
+  const curves = this.ents.filter(e => !e.dead && !e.construction
+                                    && CURVE_KINDS.indexOf(e.k) >= 0);
   // cluster endpoints
   const nodes = [];
   const nodeOf = (p) => {
@@ -1015,8 +1038,38 @@ Sketch.prototype.loops = function (tol) {
   // it is actually handed.
   const out = loops.map(chain => ({ entities: chain, sign: signedArea(this._loopPoints(chain, 0.05)) }));
   out.sort((p, q) => Math.abs(q.sign) - Math.abs(p.sign));
+
+  // Orient by containment, not by whichever way the walk happened to go: a
+  // loop inside an odd number of others is a hole and runs clockwise, so its
+  // signed area is negative and the areas sum to the material. This is the
+  // same even-odd rule the 2D distance uses, so the two cannot disagree.
+  const polys = out.map(l => this._loopPoints(l.entities, 0.05));
+  out.forEach((l, i) => {
+    let depth = 0;
+    for (let j = 0; j < out.length; j++)
+      if (j !== i && pointInPoly(polys[j], polys[i][0])) depth++;
+    l.hole = (depth % 2) === 1;
+    const want = l.hole ? -1 : 1;
+    if (Math.sign(l.sign) !== want) {
+      l.entities.reverse();
+      for (const st of l.entities) st.reversed = !st.reversed;
+      l.sign = -l.sign;
+    }
+  });
   return { loops: out, open };
 };
+
+function pointInPoly(poly, p) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const yi = poly[i][1], yj = poly[j][1];
+    if ((yi > p[1]) !== (yj > p[1])) {
+      const xx = poly[i][0] + (p[1] - yi) / (yj - yi) * (poly[j][0] - poly[i][0]);
+      if (p[0] < xx) inside = !inside;
+    }
+  }
+  return inside;
+}
 
 function signedArea(poly) {
   let A = 0;
@@ -1048,7 +1101,7 @@ Sketch.prototype.profile = function (tol) {
   return {
     loops: loops.map(l => {
       const points = this._loopPoints(l.entities, tol);
-      return { points, area: signedArea(points), entities: l.entities };
+      return { points, area: signedArea(points), hole: l.hole, entities: l.entities };
     }),
     open: open.length,     // chains that did not close: an unfinished profile
     closed: open.length === 0 && loops.length > 0

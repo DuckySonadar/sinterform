@@ -647,6 +647,60 @@ function slot(R, L) {
      `two joined lines are an open chain, not a profile (open ${prof.open})`);
 }
 
+{
+  // construction geometry constrains without being part of the drawing
+  const S = new Sketch();
+  const c = S.point(0, 0, { fixed: true });
+  S.fix(S.arc(c, 20, 20, 0, 0, 2 * Math.PI));
+  const a = S.point(-40, 0), b = S.point(40, 0);
+  const axis = S.line(a, b, { construction: true });
+  ok(S.get(axis).construction === true, 'a line can be marked construction');
+  const prof = S.profile(0.01);
+  ok(prof.closed && prof.loops.length === 1,
+     `and is not walked into a loop (${prof.loops.length} loop, not 2)`);
+  const S2 = Sketch.fromJSON(JSON.parse(JSON.stringify(S.toJSON())));
+  ok(S2.get(axis).construction === true, 'and the flag survives a round trip');
+  ok(S2.profile(0.01).loops.length === 1, 'so the restored profile matches');
+  S.construction(axis, false);
+  ok(S.profile(0.01).open === 1,
+     'clearing the flag lets the line back in — as an open chain');
+}
+{
+  // an ellipse has two semi-axes and both must be dimensionable
+  const S = new Sketch();
+  const c = S.point(0, 0, { fixed: true });
+  const e = S.arc(c, 5, 5, 0, 0, 2 * Math.PI);
+  S.constrain('radius', { e }, undefined, 14);
+  S.constrain('radiusY', { e }, undefined, 6);
+  const r = S.solve();
+  ok(r.converged, 'radius and radiusY solve together');
+  const g = S.get(e);
+  ok(Math.abs(g.rx - 14) < 1e-9 && Math.abs(g.ry - 6) < 1e-9,
+     `both semi-axes took (${g.rx.toFixed(3)}, ${g.ry.toFixed(3)})`);
+  ok(g.circular === false, 'and it knows it is not a circle');
+}
+{
+  // holes must come back clockwise, so the signed areas sum to the material
+  const S = new Sketch();
+  const c = S.point(0, 0, { fixed: true });
+  const c2 = S.point(13, 0, { fixed: true });   // clear of the other hole
+  S.fix(S.arc(c, 20, 20, 0, 0, 2 * Math.PI));       // outer
+  S.fix(S.arc(c, 8, 8, 0, 0, 2 * Math.PI));         // hole
+  S.fix(S.arc(c2, 3, 3, 0, 0, 2 * Math.PI));        // another hole
+  const prof = S.profile(0.001);
+  ok(prof.loops.length === 3, 'three loops');
+  ok(prof.loops[0].area > 0 && !prof.loops[0].hole, 'the outer runs anticlockwise');
+  ok(prof.loops[1].area < 0 && prof.loops[1].hole
+     && prof.loops[2].area < 0 && prof.loops[2].hole,
+     'and both holes run clockwise');
+  const net = prof.loops.reduce((s, l) => s + l.area, 0);
+  near(net, Math.PI * (400 - 64 - 9), 0.2, 'so the signed areas sum to the material');
+  // and the sign convention has to agree with what the field says is solid
+  const f = S.sdf2d(0.001);
+  ok(f(9, 0) < 0 && f(0, 0) > 0 && f(13, 0) > 0,
+     'the field agrees with the orientation about what is solid');
+}
+
 // ======================================================================
 console.log('\n--- and the whole way through to a solid ---');
 {

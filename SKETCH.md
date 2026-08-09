@@ -107,6 +107,14 @@ for an ellipse they do not.
 Every arc is elliptical, so say [`circular`](#constraints) when you mean a
 circle. Leaving it out lets a tangency satisfy itself by *squashing* the arc.
 
+### Construction geometry
+
+Any curve takes `{ construction: true }`, or `S.construction(id, [on])` after
+the fact. Construction geometry constrains the drawing without being part of
+it — a centreline, an axis to measure an angle against, a circle inscribed to
+size something — and **`loops()` will not walk into it**. It survives
+serialisation and shows up as `construction` in `get`.
+
 ### `nurbs(ctrlPointIds, [{ degree = 3, weights, closed = false }]) → id`
 0 own DOF; the control points are point entities and carry theirs. Clamped
 open or periodic closed. Rational — weights are honoured.
@@ -149,6 +157,7 @@ Returns a constraint object carrying `.id`. Refs are normalised, and for
 | `vertical` | direction source | 1 | parallel to +Y |
 | `distance` | two point sources, value | 1 | |
 | `radius` | an arc, value | 1 | sets `rx`; pair with `circular` for a circle |
+| `radiusY` | an arc, value | 1 | sets `ry` — an ellipse has two semi-axes |
 | `angle` | two direction sources, value | 1 | signed, radians |
 
 `CONSTRAINT_KINDS` is the list of names, for building a UI.
@@ -313,9 +322,15 @@ Loops sampled to polygons.
 }
 ```
 
-`area` is signed and measured on the polygon actually returned: **positive is
-anticlockwise**. Loops come biggest first, so `loops[0]` is the outer boundary
-and the rest are holes. Area converges linearly in `tol`, which is what a
+`area` is signed and measured on the polygon actually returned. Loops come
+biggest first, and are **oriented by containment**: a loop inside an odd
+number of others is a hole, so it carries `hole: true` and runs clockwise with
+a negative area. The signed areas therefore sum to the material. This is the
+same even-odd rule `sdf2d` uses, so the two cannot disagree.
+
+⚠️ **Loops must not intersect each other.** Two overlapping holes are not a
+profile, and the containment test will label them by whichever way the
+even-odd count falls. Area converges linearly in `tol`, which is what a
 chord approximation does — a slot reaches its analytic area to 0.03 mm² at
 `tol = 0.001`.
 
