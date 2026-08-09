@@ -9,6 +9,7 @@ STL output. Dependency-free JavaScript.
 | `sinterform.js` | the kernel — geometry, and nothing that knows a GPU exists |
 | `glsl.js` | the shader half of each primitive, and the two shader budgets |
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
+| `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
 
 They are separate because they are used separately: a mesher, a slicer or a
 test wants the first and not the second.
@@ -23,6 +24,38 @@ printing, and that is still its main consumer: MetaMeld inlines this file into
 its one shipped HTML file at build time.
 
 [mm]: https://github.com/DuckySonadar/mywebsiterepository-Iknowtotallyoriginal
+
+## Looking at it
+
+```
+open viewer.html
+```
+
+That is the whole setup. It is a plain page next to the modules, so `file://`
+works and there is nothing to install.
+
+It is **not** part of the kernel and the kernel does not know it exists — it
+consumes `sinterform.js`, `glsl.js` and `viewer.js` the way any application
+would, which is also what makes it useful: if the viewer needs something the
+modules do not expose, that is a finding about the API rather than a reason to
+reach inside. Everything about the machine is the viewer's own — the uniform
+packing, the budgets, the raymarch loop, the camera, the lights.
+
+Its one real trick is that it draws every scene **two ways**:
+
+- **GLSL · GPU** runs `glsl.js` in a fragment shader and sphere-traces it
+- **JS · mesh** runs the JS twins in `sinterform.js` and meshes them with
+  `surfaceNets`
+
+Those are meant to be the same shape, so flipping between them is a
+divergence detector you can see. `check-glsl.mjs` compares the two at sampled
+points, which is sharper per point but blind to anything the sampling misses —
+bounds that are wrong, a boolean folded the wrong way, a rotation applied in
+the other order. Those change the outline, and the outline is what this shows.
+
+The first scene is *every primitive*, which is the one that earns its keep: a
+broken primitive is obvious at a glance instead of being found later by
+whichever model happened to use it.
 
 ## Conventions
 
@@ -275,6 +308,23 @@ The last two are the ones that bite quietly. A primitive that over-estimates
 distance looks perfectly fine on screen and makes the marcher tunnel through
 thin features *somewhere else in the scene*. The run ends by printing the
 loosest primitive and the maximum safe raymarch step it implies.
+
+### `check-viewer.mjs` — does the viewer work, and do the halves agree in the large?
+
+```
+node check-viewer.mjs            # skips, loudly, if Playwright is absent
+node check-viewer.mjs --require  # what CI should run
+```
+
+Loads the page, then draws each scene both ways in **silhouette mode** — no
+ground, no shading, no tint, just where the solid is — and compares the two
+masks. Anything in the picture that is not geometry has to come out before the
+picture means anything. Agreement runs 0.93–0.99 IoU; a meshed surface sits up
+to half a cell inside the true one and its edges are faceted, so the outlines
+are close rather than identical.
+
+It also catches the ordinary breakages: a shader that stopped compiling, a
+module that stopped attaching to its global.
 
 ### `check-glsl.mjs` — do the GLSL and JS twins agree?
 
