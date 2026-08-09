@@ -197,7 +197,11 @@ const PRIMS = {
     ext: d => [Math.max(d[0], d[1]), Math.max(d[0], d[1]), d[2] / 2]
   },
   ellipsoid: {
-    name: 'Ellipsoid', fn: 'pEllip', round: false,
+    // `exact: false` is load-bearing, not a footnote: this one's gradient
+    // reaches ~1.22, so a full step of it can overshoot the surface. Whatever
+    // marches this library has to scale its steps by less than 1/that, and
+    // check-primitives.mjs prints the figure the whole set implies.
+    name: 'Ellipsoid', fn: 'pEllip', round: false, exact: false,
     dims: [['Size X', 0.5, 160, 0.5], ['Size Y', 0.5, 160, 0.5],
            ['Size Z', 0.5, 160, 0.5]],
     def: [30, 18, 14],
@@ -218,6 +222,205 @@ const PRIMS = {
       return k0 * (k0 - 1) / k1;
     },
     ext: d => [d[0] / 2, d[1] / 2, d[2] / 2]
+  },
+  prism: {
+    // Regular n-gon extruded along Z. Folding the point into one wedge and
+    // measuring to that wedge's edge segment is exact everywhere, vertices
+    // included, which a max-of-half-planes would not be.
+    name: 'Prism', fn: 'pPrism', round: true,
+    dims: [['Radius', 0.5, 80, 0.5], ['Height', 0.5, 160, 0.5],
+           ['Sides', 3, 12, 1, '']],
+    def: [12, 24, 6],
+    glsl: `float pPrism(vec3 p, vec3 d, float r){
+  float n = clamp(floor(d.z + 0.5), 3.0, 12.0);
+  float ang = 3.14159265359/n;
+  float R = max(d.x - r/cos(ang), 0.0);
+  float hh = max(d.y*0.5 - r, 0.0);
+  float a = atan(p.y, p.x);
+  a = mod(a + ang, 2.0*ang) - ang;
+  vec2 q = length(p.xy)*vec2(cos(a), sin(a));
+  float ap = R*cos(ang), hl = R*sin(ang);
+  float e = length(vec2(q.x - ap, q.y - clamp(q.y, -hl, hl)));
+  vec2 w = vec2(q.x < ap ? -e : e, abs(p.z) - hh);
+  return min(max(w.x, w.y), 0.0) + length(max(w, 0.0)) - r;
+}`,
+    js: (p, d, r) => {
+      const n = Math.min(Math.max(Math.round(d[2]), 3), 12);
+      const ang = Math.PI / n;
+      const R = Math.max(d[0] - r / Math.cos(ang), 0);
+      const hh = Math.max(d[1] * .5 - r, 0);
+      let a = Math.atan2(p[1], p[0]) + ang;
+      a = a - 2 * ang * Math.floor(a / (2 * ang)) - ang;   // GLSL mod
+      const L = Math.hypot(p[0], p[1]);
+      const qx = L * Math.cos(a), qy = L * Math.sin(a);
+      const ap = R * Math.cos(ang), hl = R * Math.sin(ang);
+      const e = Math.hypot(qx - ap, qy - Math.min(Math.max(qy, -hl), hl));
+      const wx = qx < ap ? -e : e, wy = Math.abs(p[2]) - hh;
+      return Math.min(Math.max(wx, wy), 0)
+           + Math.hypot(Math.max(wx, 0), Math.max(wy, 0)) - r;
+    },
+    ext: d => [d[0], d[0], d[1] / 2]
+  },
+  pyramid: {
+    // iq's exact pyramid is unit-base and +Y up, so the point is swizzled into
+    // that frame, divided to unit base and multiplied back -- a uniform scale,
+    // which is the only kind a distance survives.
+    //
+    // His formula measures the four lateral faces and signs the result with
+    // `max(q.z, -p.y)`, which gets the sign right below the base but not the
+    // magnitude: it keeps reporting the distance to the *extended* cone, so a
+    // point a hair under the middle of the base comes back 10.9 mm away when
+    // it is touching. Over-estimating is the direction that tunnels -- the
+    // marcher takes the whole step and passes through the solid. So the base
+    // is intersected in properly, as max() against its half-space.
+    name: 'Pyramid', fn: 'pPyr', round: false,
+    dims: [['Base', 0.5, 160, 0.5], ['Height', 0.5, 160, 0.5]],
+    def: [24, 26, 0],
+    glsl: `float pPyr(vec3 p, vec3 d, float r){
+  float b = max(d.x, 1e-4), H = max(d.y, 1e-4);
+  vec3 P = vec3(p.x, p.z + H*0.5, p.y)/b;
+  float h = H/b;
+  float m2 = h*h + 0.25;
+  P.xz = abs(P.xz);
+  P.xz = (P.z > P.x) ? P.zx : P.xz;
+  P.xz -= 0.5;
+  vec3 q = vec3(P.z, h*P.y - 0.5*P.x, h*P.x + 0.5*P.y);
+  float s = max(-q.x, 0.0);
+  float t = clamp((q.y - 0.5*P.z)/(m2 + 0.25), 0.0, 1.0);
+  float A = m2*(q.x + s)*(q.x + s) + q.y*q.y;
+  float B = m2*(q.x + 0.5*t)*(q.x + 0.5*t) + (q.y - m2*t)*(q.y - m2*t);
+  float d2 = min(q.y, -q.x*m2 - q.y*0.5) > 0.0 ? 0.0 : min(A, B);
+  float lat = sqrt((d2 + q.z*q.z)/m2);
+  float e2 = length(max(vec2(P.x, P.z), 0.0)) + min(P.x, 0.0);
+  float base = length(vec2(max(e2, 0.0), P.y));
+  float m = min(lat, base);
+  return ((q.z < 0.0 && P.y > 0.0) ? -m : m)*b;
+}`,
+    js: (p, d) => {
+      const b = Math.max(d[0], 1e-4), H = Math.max(d[1], 1e-4);
+      let Px = p[0] / b, Py = (p[2] + H * .5) / b, Pz = p[1] / b;
+      const h = H / b, m2 = h * h + 0.25;
+      Px = Math.abs(Px); Pz = Math.abs(Pz);
+      if (Pz > Px) { const s = Px; Px = Pz; Pz = s; }
+      Px -= 0.5; Pz -= 0.5;
+      const qx = Pz, qy = h * Py - 0.5 * Px, qz = h * Px + 0.5 * Py;
+      const s = Math.max(-qx, 0);
+      const t = Math.min(Math.max((qy - 0.5 * Pz) / (m2 + 0.25), 0), 1);
+      const A = m2 * (qx + s) * (qx + s) + qy * qy;
+      const B = m2 * (qx + 0.5 * t) * (qx + 0.5 * t) + (qy - m2 * t) * (qy - m2 * t);
+      const d2 = Math.min(qy, -qx * m2 - qy * 0.5) > 0 ? 0 : Math.min(A, B);
+      const lat = Math.sqrt((d2 + qz * qz) / m2);
+      const e2 = Math.hypot(Math.max(Px, 0), Math.max(Pz, 0)) + Math.min(Px, 0);
+      const base = Math.hypot(Math.max(e2, 0), Py);
+      const m = Math.min(lat, base);
+      return (qz < 0 && Py > 0 ? -m : m) * b;
+    },
+    ext: d => [d[0] / 2, d[0] / 2, d[1] / 2]
+  },
+  octa: {
+    // |x|+|y|+|z| = s is the cheap bound everyone reaches for; this is iq's
+    // exact form, which matters because a loose primitive shortens the step
+    // for every ray in the scene, not just the ones near it.
+    name: 'Octahedron', fn: 'pOcta', round: true,
+    dims: [['Size', 0.5, 100, 0.5]],
+    def: [16, 0, 0],
+    glsl: `float pOcta(vec3 p, vec3 d, float r){
+  float s = max(d.x - r*1.73205081, 0.0);
+  p = abs(p);
+  float m = p.x + p.y + p.z - s;
+  vec3 q;
+       if (3.0*p.x < m) q = p.xyz;
+  else if (3.0*p.y < m) q = p.yzx;
+  else if (3.0*p.z < m) q = p.zxy;
+  else return m*0.57735027 - r;
+  float k = clamp(0.5*(q.z - q.y + s), 0.0, s);
+  return length(vec3(q.x, q.y - s + k, q.z - k)) - r;
+}`,
+    js: (p, d, r) => {
+      const s = Math.max(d[0] - r * 1.73205081, 0);
+      const px = Math.abs(p[0]), py = Math.abs(p[1]), pz = Math.abs(p[2]);
+      const m = px + py + pz - s;
+      let qx, qy, qz;
+      if (3 * px < m) { qx = px; qy = py; qz = pz; }
+      else if (3 * py < m) { qx = py; qy = pz; qz = px; }
+      else if (3 * pz < m) { qx = pz; qy = px; qz = py; }
+      else return m * 0.57735027 - r;
+      const k = Math.min(Math.max(0.5 * (qz - qy + s), 0), s);
+      return Math.hypot(qx, qy - s + k, qz - k) - r;
+    },
+    ext: d => [d[0], d[0], d[0]]
+  },
+  dome: {
+    // A sphere with everything above local z = `cut` taken off. Negative cut
+    // leaves less than a hemisphere, positive more; at -radius it vanishes.
+    name: 'Dome', fn: 'pDome', round: false,
+    dims: [['Radius', 0.5, 80, 0.5], ['Cut height', -80, 80, 0.5]],
+    def: [16, 0, 0],
+    glsl: `float pDome(vec3 p, vec3 d, float r){
+  float R = max(d.x, 1e-4);
+  float h = clamp(d.y, -R, R);
+  float w = sqrt(max(R*R - h*h, 0.0));
+  vec2 q = vec2(length(p.xy), p.z);
+  float s = max((h - R)*q.x*q.x + w*w*(h + R - 2.0*q.y), h*q.x - w*q.y);
+  return (s < 0.0) ? length(q) - R : (q.x < w) ? h - q.y : length(q - vec2(w, h));
+}`,
+    js: (p, d) => {
+      const R = Math.max(d[0], 1e-4);
+      const h = Math.min(Math.max(d[1], -R), R);
+      const w = Math.sqrt(Math.max(R * R - h * h, 0));
+      const qx = Math.hypot(p[0], p[1]), qy = p[2];
+      const s = Math.max((h - R) * qx * qx + w * w * (h + R - 2 * qy), h * qx - w * qy);
+      return s < 0 ? Math.hypot(qx, qy) - R
+           : qx < w ? h - qy : Math.hypot(qx - w, qy - h);
+    },
+    ext: d => {
+      const R = Math.max(d[0], 1e-4), h = Math.min(Math.max(d[1], -R), R);
+      const w = h >= 0 ? R : Math.sqrt(Math.max(R * R - h * h, 0));
+      return [w, w, R];
+    }
+  },
+  arc: {
+    // A torus swept through part of a turn instead of all of it -- the hinge
+    // and spring shape. Opens symmetrically about local +Y.
+    name: 'Arc', fn: 'pArc', round: false,
+    dims: [['Ring radius', 1, 80, 0.5], ['Tube radius', 0.4, 40, 0.25],
+           ['Sweep', 10, 360, 5, '°']],
+    def: [14, 4, 180],
+    glsl: `float pArc(vec3 p, vec3 d, float r){
+  float th = clamp(d.z, 10.0, 360.0)*0.00872664626;
+  vec2 sc = vec2(sin(th), cos(th));
+  p.x = abs(p.x);
+  float k = (sc.y*p.x > sc.x*p.y) ? dot(p.xy, sc) : length(p.xy);
+  return sqrt(max(dot(p, p) + d.x*d.x - 2.0*d.x*k, 0.0)) - d.y;
+}`,
+    js: (p, d) => {
+      const th = Math.min(Math.max(d[2], 10), 360) * 0.00872664626;
+      const sx = Math.sin(th), sy = Math.cos(th);
+      const px = Math.abs(p[0]), py = p[1], pz = p[2];
+      const k = (sy * px > sx * py) ? px * sx + py * sy : Math.hypot(px, py);
+      return Math.sqrt(Math.max(px * px + py * py + pz * pz
+             + d[0] * d[0] - 2 * d[0] * k, 0)) - d[1];
+    },
+    ext: d => [d[0] + d[1], d[0] + d[1], d[1]]
+  },
+  link: {
+    // A chain link standing on end: the tube wraps a stadium in the XZ plane,
+    // so the hole runs along Y and the next link threads through it.
+    name: 'Link', fn: 'pLink', round: false,
+    dims: [['Length', 2, 120, 0.5], ['Ring radius', 0.5, 40, 0.25],
+           ['Tube radius', 0.3, 20, 0.25]],
+    def: [30, 6, 2.5],
+    glsl: `float pLink(vec3 p, vec3 d, float r){
+  float le = max(d.x*0.5 - d.y - d.z, 0.0);
+  vec3 q = vec3(p.x, max(abs(p.z) - le, 0.0), p.y);
+  return length(vec2(length(q.xy) - d.y, q.z)) - d.z;
+}`,
+    js: (p, d) => {
+      const le = Math.max(d[0] * .5 - d[1] - d[2], 0);
+      const qx = p[0], qy = Math.max(Math.abs(p[2]) - le, 0), qz = p[1];
+      return Math.hypot(Math.hypot(qx, qy) - d[1], qz) - d[2];
+    },
+    ext: d => [d[1] + d[2], d[2], Math.max(d[0] / 2, d[1] + d[2])]
   },
   plane: {
     name: 'Plane cut', fn: 'pPlane', round: false, infinite: true,
@@ -264,6 +467,19 @@ const PRIMS = {
 };
 const PRIM_KEYS = Object.keys(PRIMS);
 const OPS = [['add', 'Add'], ['cut', 'Cut'], ['keep', 'Keep']];
+
+// A dim entry is [label, min, max, step, unit?]. No unit means millimetres,
+// and millimetres are the only thing that may be scaled: multiplying a shape
+// by 1.5 has to leave a hexagon a hexagon and a 90° arc a 90° arc. Consumers
+// ask here rather than each keeping their own list of exceptions.
+function dimIsLength(t, i) {
+  const dim = PRIMS[t] && PRIMS[t].dims[i];
+  return !!dim && dim[4] === undefined;
+}
+function dimUnit(t, i) {
+  const dim = PRIMS[t] && PRIMS[t].dims[i];
+  return dim && dim[4] !== undefined ? dim[4] : ' mm';
+}
 
 function smin(a, b, k) {
   if (k <= 0) return Math.min(a, b);
@@ -458,7 +674,7 @@ function meshToSTL(m, header) {
 // symptom would be a baked shape that renders as the one you opened before.
 // ----------------------------------------------------------------------
 const SinterForm = {
-  MAXN, MAXFIELDS, PRIMS, PRIM_KEYS, OPS, RAD,
+  MAXN, MAXFIELDS, PRIMS, PRIM_KEYS, OPS, RAD, dimIsLength, dimUnit,
   get fields() { return fields; },
   set fields(v) { fields = v; },
   decodeField, encodeField, sampleField,

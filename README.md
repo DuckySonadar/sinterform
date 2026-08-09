@@ -121,14 +121,25 @@ because it runs once per shape per sample.
 
 ### Tables
 
-`PRIMS` maps a key to a primitive: display `name`, its `dims` (label, min,
-max, step), defaults, a `glsl` source string, a `js` twin, and `ext` for
-bounds. `PRIM_KEYS` is its key list, `OPS` the boolean operations with
-labels, `MAXN` the shader's shape budget, and `RAD` is `π/180`.
+`PRIMS` maps a key to a primitive: display `name`, its `dims`, defaults, a
+`glsl` source string, a `js` twin, and `ext` for bounds. `PRIM_KEYS` is its
+key list, `OPS` the boolean operations with labels, `MAXN` the shader's shape
+budget, and `RAD` is `π/180`.
+
+A dim is `[label, min, max, step, unit?]`. **No unit means millimetres, and
+millimetres are the only thing that scales** — multiplying a shape by 1.5 has
+to leave a hexagon a hexagon and a 90° arc a 90° arc. Ask `dimIsLength(t, i)`
+and `dimUnit(t, i)` rather than keeping your own list of exceptions.
+
+`exact: false` marks a primitive whose function is a safe *bound* rather than
+a true distance — currently only the ellipsoid. It matters more than it
+sounds: a raymarcher folds every shape into one `min`, so the loosest
+primitive in the library sets the step size for every ray in the scene.
+`check-primitives.mjs` prints the maximum safe step the set implies.
 
 To add a primitive, add an entry with both a `glsl` and a `js` implementation.
 They must agree; a mismatch shows up as a preview that disagrees with the
-exported mesh.
+exported mesh. `check-glsl.mjs` will tell you.
 
 ### Baked fields
 
@@ -161,18 +172,58 @@ happened once already. `check-kernel.mjs` asserts it.
 
 ## Tests
 
+Three, each answering a different question. All exit 0 or 1.
+
+### `check-kernel.mjs` — is the seam intact?
+
 ```
 node check-kernel.mjs             # checks sinterform.js
 node check-kernel.mjs some.html   # checks the <script id="sinterform"> in it
 ```
 
-27 assertions, exit code 0 or 1. It refuses the kernel if it names anything
-browser-shaped, runs it under node with no DOM at all, and asks it for
-geometry whose answer is known.
+27 assertions. Refuses the kernel if it names anything browser-shaped, runs it
+under node with no DOM at all, and asks it for geometry whose answer is known.
 
 The HTML form is there so a project that inlines the kernel can check the file
 its build actually produced, using these assertions rather than a second copy
 of them that drifts.
+
+### `check-primitives.mjs` — is each primitive really a distance function?
+
+```
+node check-primitives.mjs
+```
+
+Per primitive: that it encloses something, that `ext()` really does contain it
+(a short box silently crops an exported mesh, which is the slowest of these to
+notice), that it is 1-Lipschitz so a step of it can never cross the surface,
+and — unless marked `exact: false` — that `|∇f| = 1`.
+
+The last two are the ones that bite quietly. A primitive that over-estimates
+distance looks perfectly fine on screen and makes the marcher tunnel through
+thin features *somewhere else in the scene*. The run ends by printing the
+loosest primitive and the maximum safe raymarch step it implies.
+
+### `check-glsl.mjs` — do the GLSL and JS twins agree?
+
+```
+node check-glsl.mjs            # skips, loudly, if Playwright is absent
+node check-glsl.mjs --require  # what CI should run
+```
+
+Compiles the real GLSL on a real GPU, evaluates every primitive at 4096
+points, and compares against the JS at the same points. Two implementations
+sitting next to each other in the source was the only thing keeping them in
+step; this is the thing that checks.
+
+It needs Playwright and a browser. The kernel does not depend on either and
+does not intend to, so without them the check reports that it skipped and
+exits 0 — `--require` makes that fatal instead.
+
+Note that GLSL ES only promises its transcendentals to about 2⁻¹¹ relative, so
+primitives whose fold goes through `atan` carry a small angle error the JS twin
+does not. The prism is held to a looser bar for that reason; at a 40 mm radius
+it is ~0.007 mm, two orders under the finest thing this prints.
 
 ## Licence
 
