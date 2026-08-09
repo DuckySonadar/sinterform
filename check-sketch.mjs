@@ -392,5 +392,158 @@ console.log('\n--- sampling ---');
   }
 }
 
+// ======================================================================
+console.log('\n--- the public surface: nothing here reaches into S.x ---');
+{
+  const S = new Sketch();
+  const c = S.point(2, -3);
+  const ar = S.arc(c, 12, 7, 0.4, 0, Math.PI);
+  const g = S.get(ar);
+  ok(g.kind === 'arc' && g.rx === 12 && g.ry === 7 && Math.abs(g.phi - 0.4) < 1e-12,
+     'get() returns an arc without anyone knowing the variable layout');
+  ok(g.centre[0] === 2 && g.centre[1] === -3, 'and resolves its centre');
+  ok(g.circular === false, 'and says whether it is a circle');
+  S.set(ar, { ry: 12 });
+  ok(S.get(ar).circular === true, 'set() writes back, and the snapshot follows');
+
+  const p = S.get(c);
+  ok(p.x === 2 && p.y === -3 && p.fixed === false, 'points read back too');
+  S.set(c, { x: 40, fixed: true });
+  const p2 = S.get(c);
+  ok(p2.x === 40 && p2.fixed === true, 'and take a position and a pin');
+
+  // a snapshot must be safe to hand straight back
+  const snap = S.get(ar);
+  snap.rx = 5;
+  ok(S.get(ar).rx === 12, 'snapshots are copies, not windows into the sketch');
+  S.set(ar, snap);
+  ok(S.get(ar).rx === 5, 'and can be handed back');
+}
+{
+  const S = new Sketch();
+  const a = S.point(0, 0), b = S.point(10, 0);
+  const ln = S.line(a, b);
+  const t = S.tangentAt(ln, 0.5), nrm = S.normalAt(ln, 0.5);
+  near(Math.hypot(t[0], t[1]), 1, 1e-12, 'tangentAt is a unit vector');
+  near(dot(t, nrm), 0, 1e-12, 'and normalAt is square to it');
+  near(Math.hypot(nrm[0], nrm[1]), 1, 1e-12, 'and is a unit vector too');
+  const d = S.dirOf({ e: ln }), P = S.posOf({ p: a });
+  ok(d[0] === 10 && d[1] === 0 && P[0] === 0, 'dirOf and posOf resolve refs');
+}
+{
+  const S = new Sketch();
+  const a = S.point(0, 0, { fixed: true }), b = S.point(9, 2);
+  const ln = S.line(a, b);
+  const c1 = S.constrain('horizontal', { e: ln });
+  const c2 = S.constrain('distance', { p: a }, { p: b }, 20);
+  ok(S.constraints().length === 2, 'constraints() lists them');
+  ok(S.constraints()[0].id !== S.constraints()[1].id, 'each has its own id');
+  ok(S.constraintsOn(b).length === 1,
+     `constraintsOn() finds what mentions a point (${S.constraintsOn(b).length})`);
+  ok(S.dropConstraint(c1) && S.constraints().length === 1, 'dropConstraint removes one');
+  ok(!S.dropConstraint(c1), 'and says so when there is nothing to remove');
+  void c2;
+}
+{
+  // diagnose must agree with solve, without having moved anything
+  const S = new Sketch();
+  const a = S.point(0, 0, { fixed: true }), b = S.point(7, 3);
+  const ln = S.line(a, b);
+  S.constrain('horizontal', { e: ln });
+  S.constrain('distance', { p: a }, { p: b }, 20);
+  const before = S.get(b);
+  const d = S.diagnose();
+  const after = S.get(b);
+  ok(after.x === before.x && after.y === before.y, 'diagnose() moves nothing');
+  ok(d.dof === 0 && d.equations === 2 && d.rank === 2,
+     `and reports the same shape as a solve (dof ${d.dof}, rank ${d.rank})`);
+  ok(!d.converged, 'and knows the sketch does not hold yet');
+  const r = S.solve();
+  ok(r.converged && r.dof === d.dof, 'the solve agrees on the count');
+}
+{
+  // dropping an entity takes its dependants and its constraints with it
+  const S = new Sketch();
+  const a = S.point(0, 0), b = S.point(10, 0), c = S.point(10, 10);
+  const l1 = S.line(a, b), l2 = S.line(b, c);
+  S.constrain('perpendicular', { e: l1 }, { e: l2 });
+  ok(S.entities().length === 5, 'five entities to start');
+  S.dropEntity(b);
+  ok(S.get(b).dead === true, 'the point is retired');
+  ok(S.get(l1).dead === true && S.get(l2).dead === true,
+     'and both lines that used it went with it');
+  ok(S.constraints().length === 0, 'and the constraint between them is gone');
+  ok(S.entities().length === 2, `entities() hides the dead (${S.entities().length} left)`);
+  ok(S.diagnose().dof === 4, 'and the retired variables leave the dof count');
+}
+
+// ======================================================================
+console.log('\n--- a document survives a round trip ---');
+{
+  const S = new Sketch();
+  const c1 = S.point(0, 0, { fixed: true }), c2 = S.point(38, 4);
+  const a1 = S.arc(c1, 8, 8, 0, Math.PI / 2, 3 * Math.PI / 2);
+  const a2 = S.arc(c2, 6, 6, 0, -Math.PI / 2, Math.PI / 2);
+  const t1 = S.point(0, 8), t2 = S.point(38, 10);
+  const top = S.line(t1, t2);
+  const cs = [S.point(60, 0), S.point(70, 20), S.point(88, -6), S.point(100, 10)];
+  const nb = S.nurbs(cs, { degree: 3, weights: [1, 2, 1, 1.5] });
+  S.constrain('circular', { e: a1 });
+  S.constrain('circular', { e: a2 });
+  S.constrain('equal', { e: a1 }, { e: a2 });
+  S.constrain('radius', { e: a1 }, undefined, 8);
+  S.constrain('distance', { p: c1 }, { p: c2 }, 38);
+  S.constrain('horizontal', { e: S.line(c1, c2) });
+  S.constrain('tangent', { e: top }, { e: a1 });
+  S.constrain('tangent', { e: top }, { e: a2 });
+  const r1 = S.solve({ maxIter: 400 });
+
+  const doc = JSON.parse(JSON.stringify(S.toJSON()));
+  const T = Sketch.fromJSON(doc);
+
+  ok(T.ents.length === S.ents.length,
+     `same entity count, so ids still mean the same thing (${T.ents.length})`);
+  ok(T.constraints().length === S.constraints().length,
+     'same constraint count — tangency did not mint a second set of parameters');
+
+  let worst = 0;
+  for (const e of S.ents) {
+    if (e.k !== 'point') continue;
+    const A = S.get(e.id), B = T.get(e.id);
+    worst = Math.max(worst, Math.abs(A.x - B.x), Math.abs(A.y - B.y));
+  }
+  near(worst, 0, 1e-12, 'every point came back where it was');
+
+  const d = T.diagnose();
+  ok(d.converged, 'the restored sketch is already satisfied — no re-solve needed');
+  ok(d.dof === r1.dof && d.rank === r1.rank,
+     `and has the same dof and rank (${d.dof}, ${d.rank})`);
+
+  // the spline has to survive weights, degree and its domain
+  const gs = S.get(nb), gt = T.get(nb);
+  ok(JSON.stringify(gs.weights) === JSON.stringify(gt.weights)
+     && gs.degree === gt.degree && gs.closed === gt.closed,
+     'the spline kept its weights, degree and closedness');
+  let sw = 0;
+  for (let u = 0; u <= 1.0001; u += 0.05) {
+    const p = S.evalAt(S.x, nb, Math.min(u, 1)), q = T.evalAt(T.x, nb, Math.min(u, 1));
+    sw = Math.max(sw, Math.hypot(p.p[0] - q.p[0], p.p[1] - q.p[1]));
+  }
+  near(sw, 0, 1e-12, 'and traces the identical curve');
+
+  // and solving the restored one changes nothing
+  const r2 = T.solve({ maxIter: 400 });
+  ok(r2.converged && r2.iterations === 0,
+     `re-solving a restored sketch is a no-op (${r2.iterations} iterations)`);
+}
+{
+  const S = new Sketch();
+  S.point(0, 0);
+  ok(S.toJSON().sinterSketch === 1, 'documents carry a version');
+  let threw = false;
+  try { Sketch.fromJSON({ entities: [], constraints: [] }); } catch { threw = true; }
+  ok(threw, 'and an unversioned one is refused rather than half-read');
+}
+
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);
 process.exit(fail ? 1 : 0);

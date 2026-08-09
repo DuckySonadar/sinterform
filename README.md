@@ -174,108 +174,33 @@ const b = S.point(10, 3);
 const ln = S.line(a, b);
 S.constrain('horizontal', { e: ln });
 S.constrain('distance', { p: a }, { p: b }, 20);
-S.solve();   // → { converged, dof, rank, redundant, conflicting, ... }
+S.solve();            // → { converged, dof, rank, redundant, conflicting, … }
+S.get(b);             // → { kind: 'point', x: 20, y: 0, fixed: false, … }
 ```
 
-### The contact parameter is a variable
+Constraints: `coincident`, `concentric`, `centre`, `collinear`, `parallel`,
+`perpendicular`, `tangent`, `equal`, `circular`, `on`, `horizontal`,
+`vertical`, `distance`, `radius`, `angle`.
 
-This is the one design decision everything else follows from.
+The design turns on one thing. A constraint touching a curve has to know
+*where* it touches, and that is not knowable in advance — it moves as the
+sketch solves. So contact parameters are solver variables, which lets
+`perpendicular` take any two **direction sources** and not care which is
+which: line to line, line to arc tangent, line to spline tangent and spline to
+spline all run through the same three lines of code. Sketchers that keep the
+contact point implicit cannot express the question, which is why they tend to
+offer perpendicular between two lines and leave splines out.
 
-A constraint touching a curve has to know *where* it touches, and that
-location is not knowable in advance — it moves as the sketch solves.
-"Perpendicular to this spline" is not a complete sentence. "Perpendicular to
-this spline's tangent, at the point where they meet" is, and the meeting point
-is an unknown like any other.
+**Angles here are radians**, unlike a node's rotation in `sinterform.js`,
+which is degrees because it comes from a slider. Convert at the boundary.
 
-So contact parameters are solver variables here. Which means `perpendicular`
-takes any two **direction sources** and does not care which is which:
-
-```js
-S.constrain('perpendicular', { e: line },     { e: otherLine });
-S.constrain('perpendicular', { e: line },     { e: arc,    t });   // t is a param
-S.constrain('perpendicular', { e: line },     { e: spline, t });
-S.constrain('perpendicular', { e: splineA, t1 }, { e: splineB, t2 });
-```
-
-All four go through the same three lines of code. Sketchers that keep the
-contact point implicit cannot do this — they end up offering perpendicular
-between two lines, special-casing "perpendicular to a circle" as "passes
-through the centre", and leaving splines out altogether.
-
-### References
-
-| form | means |
-| --- | --- |
-| `{ p: id }` | a point entity |
-| `{ e: id }` | a whole entity — a line's direction, an arc's centre, a curve's size |
-| `{ e: id, t: paramId }` | a location on an entity, at a solved parameter: both a position and a tangent |
-
-A **direction source** is `{ e: lineId }` or `{ e: anyId, t }`. A **point
-source** is `{ p: id }` or `{ e: anyId, t }`.
-
-### Constraints
-
-| name | takes | equations |
-| --- | --- | --- |
-| `coincident` | two point sources | 2 |
-| `concentric` | two curves | 2 |
-| `centre` | a point source, a curve | 2 |
-| `collinear` | two lines | 2 |
-| `parallel` | two direction sources | 1 |
-| `perpendicular` | two direction sources | 1 |
-| `tangent` | two curves | 3, and creates 2 contact params → net 1 |
-| `equal` | two lines, or two arcs | 1 / 2 |
-| `circular` | an arc | 1 |
-| `on` | a point source, a curve | 2 |
-| `horizontal`, `vertical` | a direction source | 1 |
-| `distance`, `radius`, `angle` | as named, plus a value | 1 |
-
-`centre` means an arc's centre, and a line's midpoint — which is what someone
-means when they drop a centre mark on a line.
-
-`circular` exists because every arc here is elliptical. Leave it out and a
-tangency will find its answer by *squashing* the arc rather than moving it —
-a correct solve of a sketch nobody meant to draw.
-
-### What comes back
-
-```js
-{ converged, residual, iterations,
-  variables,    // free variables, contact parameters included
-  equations, rank,
-  dof,          // 0 is fully constrained
-  redundant,    // constraints that said something already said
-  conflicting } // constraints that cannot all hold
-```
-
-Rank is measured at the solution, so `dof` is trustworthy even when the solve
-did nothing because the sketch already held.
-
-### Two things to know
-
-**Tangency is two-valued.** Two circles can touch side by side or nested, and
-both satisfy "touching, with tangents in line" exactly. Contact parameters are
-initialised by aiming each at the other entity, which picks the arrangement
-someone drawing it would have meant — three circles told to touch each other
-land outside each other, from any starting layout. But it only chooses the
-near answer; it does not make the far one go away.
-
-**Damping is isotropic**, `λ·max(diag(JᵀJ))` rather than Marquardt's
-`λ·diag(JᵀJ)`. Per-coordinate damping is the textbook choice and it is wrong
-here: sketches are nearly always rank-deficient, and scaling damping per
-coordinate lets the step run furthest exactly where it knows least. Asked to
-make two lines perpendicular, it returned a step that stretched one of them to
-500 mm instead of rotating it.
-
-### Tests
+📖 **[SKETCH.md](SKETCH.md) is the full API reference** — entities,
+constraints, the solve report, reading and editing, serialisation, and the two
+characteristics worth knowing about before relying on it.
 
 ```
-node check-sketch.mjs
+node check-sketch.mjs      # 86 assertions
 ```
-
-49 assertions. Every constraint is verified independently after the solve —
-measured from the geometry, not by asking the residual that was just
-minimised, because a residual can be small for the wrong reason.
 
 ## Inlining it into HTML
 

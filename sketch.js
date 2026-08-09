@@ -259,7 +259,7 @@ Sketch.prototype.nurbs = function (ctrl, o) {
     for (let i = 0; i < p; i++) U[m + 1 + i] = 1;
   }
   const e = { k: KIND.NURBS, id: this.ents.length, ctrl: cp, w: ww, p, U, closed,
-              n: m - 1, base: ctrl.slice() };
+              n: m - 1, base: ctrl.slice(), baseW: w.slice() };
   this.ents.push(e);
   return e.id;
 };
@@ -335,6 +335,26 @@ Sketch.prototype.centreOf = function (x, id) {
 };
 
 // ---- resolving refs ---------------------------------------------------
+// Unit tangent, and the normal that goes with it. `normalAt` is here because
+// the constraint that motivated this file is easier to *check* than to state:
+// a line perpendicular to a curve's tangent runs along its normal.
+Sketch.prototype.tangentAt = function (id, t) {
+  const d = this.evalAt(this.x, id, t).d;
+  const l = Math.hypot(d[0], d[1]) || 1;
+  return [d[0] / l, d[1] / l];
+};
+Sketch.prototype.normalAt = function (id, t) {
+  const u = this.tangentAt(id, t);
+  return [-u[1], u[0]];
+};
+
+// Resolve a ref to a position or a direction, against the current solution.
+// These are the two questions the constraints themselves ask, so anything
+// built on this file will want to ask them too -- to draw a glyph where a
+// constraint bites, or to check one independently.
+Sketch.prototype.posOf = function (r) { return this._pos(this.x, r); };
+Sketch.prototype.dirOf = function (r) { return this._dir(this.x, r); };
+
 Sketch.prototype._pos = function (x, r) {
   if (r.p !== undefined) return this.ptOf(x, r.p);
   if (r.e !== undefined && r.t !== undefined)
@@ -563,8 +583,19 @@ Sketch.prototype.constrain = function (kind, a, b, v) {
   let A = norm(a), B = b === undefined ? undefined : norm(b);
   if (kind === 'tangent') [A, B] = this._tangentParams(A, B);
   if (kind === 'on') B = this._needParam(B, A.p !== undefined ? this.ptOf(this.x, A.p) : null);
-  const c = { kind, a: A, b: B, v,
-              n: typeof C.n === 'function' ? C.n(this, A, B) : C.n, f: C.f };
+  return this.addConstraint(kind, A, B, v);
+};
+
+// The same thing with nothing inferred: refs are taken exactly as given, and
+// no contact parameters are invented. `constrain` is the ergonomic door;
+// this is the one deserialisation comes through, because a round trip must
+// not quietly mint a second set of parameters for a tangency that already
+// has them.
+Sketch.prototype.addConstraint = function (kind, a, b, v) {
+  const C = CONSTRAINTS[kind];
+  if (!C) throw new Error(`no such constraint: ${kind}`);
+  const c = { kind, a, b, v, id: this._cid = (this._cid || 0) + 1,
+              n: typeof C.n === 'function' ? C.n(this, a, b) : C.n, f: C.f };
   this.cons.push(c);
   return c;
 };
@@ -725,7 +756,192 @@ Sketch.prototype.sample = function (id, tol) {
   return out;
 };
 
-const SinterSketch = { Sketch, CONSTRAINTS, KIND, findSpan, dersBasisFuns, rankOf };
+// ======================================================================
+// reading and editing a sketch from outside
+// ======================================================================
+// Everything solvable lives in one flat array, and where each entity's
+// numbers sit in it is nobody else's business. These are the accessors that
+// make that true -- without them the first thing anyone writes is
+// `S.x[S.ents[id].vrx]`, and then the layout can never change again.
+
+// A plain snapshot. No live references into the sketch: change it freely.
+Sketch.prototype.get = function (id) {
+  const e = this.ents[id];
+  if (!e) throw new Error(`no entity ${id}`);
+  const F = (v) => this.fixed[v];
+  switch (e.k) {
+    case KIND.POINT:
+      return { id, kind: e.k, dead: !!e.dead, x: this.x[e.vx], y: this.x[e.vy],
+               fixed: F(e.vx) && F(e.vy) };
+    case KIND.PARAM:
+      return { id, kind: e.k, dead: !!e.dead, t: this.x[e.v], fixed: F(e.v) };
+    case KIND.LINE:
+      return { id, kind: e.k, dead: !!e.dead, a: e.a, b: e.b,
+               from: this.ptOf(this.x, e.a), to: this.ptOf(this.x, e.b) };
+    case KIND.ARC:
+      return { id, kind: e.k, dead: !!e.dead, c: e.c,
+               centre: this.ptOf(this.x, e.c),
+               rx: this.x[e.vrx], ry: this.x[e.vry], phi: this.x[e.vphi],
+               t0: this.x[e.vt0], t1: this.x[e.vt1],
+               circular: Math.abs(this.x[e.vrx] - this.x[e.vry]) < 1e-9 };
+    case KIND.NURBS:
+      return { id, kind: e.k, dead: !!e.dead, ctrl: e.base.slice(),
+               weights: e.baseW.slice(), degree: e.p, closed: e.closed,
+               domain: [e.U[e.p], e.U[e.n + 1]] };
+    default:
+      return { id, kind: e.k, dead: !!e.dead };
+  }
+};
+
+// Write values back. This is how a drag works: set the point, fix it, solve,
+// unfix it. Silently ignores fields an entity does not have, so a snapshot
+// from get() can be handed straight back.
+Sketch.prototype.set = function (id, vals) {
+  const e = this.ents[id];
+  if (!e) throw new Error(`no entity ${id}`);
+  const put = (slot, v) => { if (typeof v === 'number') this.x[slot] = v; };
+  if (e.k === KIND.POINT) { put(e.vx, vals.x); put(e.vy, vals.y); }
+  else if (e.k === KIND.PARAM) put(e.v, vals.t);
+  else if (e.k === KIND.ARC) {
+    put(e.vrx, vals.rx); put(e.vry, vals.ry); put(e.vphi, vals.phi);
+    put(e.vt0, vals.t0); put(e.vt1, vals.t1);
+  }
+  if (vals.fixed !== undefined) this.fix(id, vals.fixed);
+  return id;
+};
+
+Sketch.prototype.entities = function (kind) {
+  const out = [];
+  for (const e of this.ents)
+    if (!e.dead && (!kind || e.k === kind)) out.push(this.get(e.id));
+  return out;
+};
+
+Sketch.prototype.constraints = function () {
+  return this.cons.map(c => ({ id: c.id, kind: c.kind, a: c.a, b: c.b,
+                               value: c.v, equations: c.n }));
+};
+
+// Which constraints mention an entity -- what a UI needs to grey out a
+// delete, or to explain why something will not move.
+Sketch.prototype.constraintsOn = function (id) {
+  const hits = (r) => !!r && (r.p === id || r.e === id || r.t === id);
+  return this.cons.filter(c => hits(c.a) || hits(c.b))
+                  .map(c => ({ id: c.id, kind: c.kind }));
+};
+
+Sketch.prototype.dropConstraint = function (ref) {
+  const id = typeof ref === 'object' ? ref.id : ref;
+  const before = this.cons.length;
+  this.cons = this.cons.filter(c => c.id !== id);
+  return this.cons.length < before;
+};
+
+// Entity ids are indices, so an entity cannot be spliced out without
+// invalidating every id after it. It is retired instead: its variables are
+// pinned so they leave the degree-of-freedom count, everything that referred
+// to it is dropped, and the id stays burnt. Round-trip through toJSON to
+// compact.
+// Pin only the numbers this entity owns. `fix` deliberately reaches through
+// to an entity's points, because pinning a line means pinning its ends -- but
+// retiring one must not, or dropping a line would pin the points it happened
+// to share with the lines still standing.
+Sketch.prototype._pinOwn = function (id) {
+  const e = this.ents[id];
+  const set = (v) => { this.fixed[v] = true; };
+  if (e.k === KIND.POINT) { set(e.vx); set(e.vy); }
+  else if (e.k === KIND.PARAM) set(e.v);
+  else if (e.k === KIND.ARC) { set(e.vrx); set(e.vry); set(e.vphi); set(e.vt0); set(e.vt1); }
+};
+
+Sketch.prototype.dropEntity = function (id) {
+  const e = this.ents[id];
+  if (!e || e.dead) return false;
+  e.dead = true;
+  this._pinOwn(id);
+  for (const c of this.constraintsOn(id)) this.dropConstraint(c.id);
+  for (const other of this.ents) {
+    if (other.dead) continue;
+    const uses = (other.k === KIND.LINE && (other.a === id || other.b === id))
+      || (other.k === KIND.ARC && other.c === id)
+      || (other.k === KIND.NURBS && other.base.indexOf(id) >= 0);
+    if (uses) this.dropEntity(other.id);
+  }
+  return true;
+};
+
+// The report, without moving anything. Use it to show a live degree-of-freedom
+// count while someone is still drawing.
+Sketch.prototype.diagnose = function () {
+  const free = this._free(), n = free.length;
+  const m = this.cons.reduce((s, c) => s + c.n, 0);
+  const x = Float64Array.from(this.x);
+  const r = new Float64Array(m), scratch = new Float64Array(m), plus = new Float64Array(m);
+  const J = new Float64Array(m * n);
+  this.residuals(x, r);
+  let f = 0;
+  for (let i = 0; i < m; i++) f += r[i] * r[i];
+  f = Math.sqrt(f);
+  if (m && n) this._jac(x, free, J, m, scratch, plus);
+  return this._report(x, free, J, m, f, 0, f <= 1e-7);
+};
+
+// ======================================================================
+// serialisation
+// ======================================================================
+// A construction script rather than a memory dump: entity specs in creation
+// order, then constraints with their refs already resolved. Replaying it
+// rebuilds the same ids, which is what lets refs be plain numbers.
+Sketch.prototype.toJSON = function () {
+  return {
+    sinterSketch: 1,
+    scale: this.scale,
+    entities: this.ents.map(e => {
+      const g = this.get(e.id);
+      switch (e.k) {
+        case KIND.POINT: return { kind: e.k, x: g.x, y: g.y, fixed: g.fixed, dead: g.dead };
+        case KIND.PARAM: return { kind: e.k, t: g.t, fixed: g.fixed, dead: g.dead };
+        case KIND.LINE: return { kind: e.k, a: e.a, b: e.b, dead: g.dead };
+        case KIND.ARC: return { kind: e.k, c: e.c, rx: g.rx, ry: g.ry, phi: g.phi,
+                                t0: g.t0, t1: g.t1,
+                                fixed: this.fixed[e.vrx], dead: g.dead };
+        case KIND.NURBS: return { kind: e.k, ctrl: g.ctrl, weights: g.weights,
+                                  degree: g.degree, closed: g.closed, dead: g.dead };
+        default: return { kind: e.k, dead: g.dead };
+      }
+    }),
+    constraints: this.cons.map(c => ({ kind: c.kind, a: c.a, b: c.b, value: c.v }))
+  };
+};
+
+Sketch.fromJSON = function (o) {
+  if (!o || o.sinterSketch !== 1)
+    throw new Error('not a SinterSketch document (want sinterSketch: 1)');
+  const S = new Sketch({ scale: o.scale });
+  for (const s of o.entities) {
+    let id;
+    switch (s.kind) {
+      case KIND.POINT: id = S.point(s.x, s.y, { fixed: s.fixed }); break;
+      case KIND.PARAM: id = S.param(s.t, { fixed: s.fixed }); break;
+      case KIND.LINE: id = S.line(s.a, s.b); break;
+      case KIND.ARC: id = S.arc(s.c, s.rx, s.ry, s.phi, s.t0, s.t1,
+                                { fixed: s.fixed }); break;
+      case KIND.NURBS: id = S.nurbs(s.ctrl, { weights: s.weights, degree: s.degree,
+                                              closed: s.closed }); break;
+      default: throw new Error(`unknown entity kind: ${s.kind}`);
+    }
+    if (s.dead) S.ents[id].dead = true;
+  }
+  // addConstraint, not constrain: the refs are already resolved, and inferring
+  // again here would mint a second set of contact parameters.
+  for (const c of o.constraints) S.addConstraint(c.kind, c.a, c.b, c.value);
+  return S;
+};
+
+const CONSTRAINT_KINDS = Object.keys(CONSTRAINTS);
+
+const SinterSketch = { Sketch, CONSTRAINTS, CONSTRAINT_KINDS, KIND,
+                       findSpan, dersBasisFuns, rankOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterSketch;
 root.SinterSketch = SinterSketch;
 })(typeof self !== 'undefined' ? self : globalThis);
