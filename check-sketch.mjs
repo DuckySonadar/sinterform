@@ -546,6 +546,93 @@ console.log('\n--- a document survives a round trip ---');
 }
 
 // ======================================================================
+console.log('\n--- the caller owns the loop ---');
+function tangle() {
+  // something that takes a few iterations to settle
+  const S = new Sketch();
+  const a = S.point(0, 0, { fixed: true }), b = S.point(9, 2);
+  const c = S.point(30, 25), d = S.point(46, 4);
+  const l1 = S.line(a, b), l2 = S.line(b, c), l3 = S.line(c, d);
+  S.constrain('perpendicular', { e: l1 }, { e: l2 });
+  S.constrain('perpendicular', { e: l2 }, { e: l3 });
+  S.constrain('distance', { p: a }, { p: b }, 20);
+  S.constrain('distance', { p: b }, { p: c }, 30);
+  S.constrain('distance', { p: c }, { p: d }, 18);
+  S.constrain('horizontal', { e: l1 });
+  return S;
+}
+{
+  const A = tangle(), B = tangle();
+  const rA = A.solve();
+  const run = B.solver();
+  let steps = 0;
+  while (!run.step().done) steps++;
+  const rB = run.report();
+  ok(rA.converged && rB.converged, 'both routes converge');
+  ok(rA.iterations === rB.iterations,
+     `and take the same ${rA.iterations} iterations`);
+  ok(steps === rA.iterations - 1,
+     `the last step is the one that reports done (${steps} + 1 = ${rA.iterations})`);
+  let worst = 0;
+  for (const e of A.entities('point'))
+    worst = Math.max(worst, Math.abs(e.x - B.get(e.id).x), Math.abs(e.y - B.get(e.id).y));
+  near(worst, 0, 1e-12, 'to the same geometry, to the last bit');
+}
+{
+  // stepping is observable: the sketch moves, and the residual falls
+  const S = tangle();
+  const run = S.solver();
+  const before = S.get(2);
+  const seen = [];
+  let moved = false;
+  for (let i = 0; i < 4; i++) {
+    const st = run.step();
+    seen.push(st.residual);
+    const now = S.get(2);
+    if (Math.abs(now.x - before.x) > 1e-9 || Math.abs(now.y - before.y) > 1e-9) moved = true;
+    if (st.done) break;
+  }
+  ok(moved, 'the geometry moves between steps, so a consumer can draw it settling');
+  ok(seen.every((v, i) => i === 0 || v <= seen[i - 1]),
+     `and the residual never rises (${seen.map(v => v.toExponential(1)).join(' → ')})`);
+}
+{
+  // stopping early has to leave an honest report, not a hopeful one
+  const S = tangle();
+  const run = S.solver();
+  run.step();
+  const r = run.report();
+  ok(!r.converged && r.iterations === 1,
+     `a solve stopped after one step says so (converged ${r.converged}, iterations ${r.iterations})`);
+  ok(r.dof !== undefined && r.rank > 0, 'and still reports rank and dof from where it got to');
+  // and it can be picked up again
+  let more = 0;
+  while (!run.step().done) more++;
+  ok(run.report().converged, `and resuming finishes the job (${more} more steps)`);
+}
+{
+  // maxIter 0 is a legitimate request: tell me about this sketch, move nothing
+  const S = tangle();
+  const before = S.get(2);
+  const r = S.solve({ maxIter: 0 });
+  const after = S.get(2);
+  ok(!r.converged && r.iterations === 0, 'maxIter 0 runs no iterations');
+  ok(after.x === before.x && after.y === before.y, 'and moves nothing');
+}
+{
+  // a sketch that cannot improve stops itself rather than spinning to maxIter
+  const S = new Sketch();
+  const a = S.point(0, 0, { fixed: true }), b = S.point(10, 0);
+  const ln = S.line(a, b);
+  S.constrain('horizontal', { e: ln });
+  S.constrain('vertical', { e: ln });
+  const run = S.solver({ maxIter: 500 });
+  while (!run.step().done) { /* run it out */ }
+  ok(run.state.stalled, 'an impossible sketch reports that it stalled');
+  ok(run.report().iterations < 500, `rather than burning every iteration (${run.report().iterations})`);
+}
+
+// ======================================================================
 console.log('\n--- profiles: a solved sketch is not yet something you can extrude ---');
 
 // A closed slot, built the way a profile has to be built: ends constrained

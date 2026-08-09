@@ -171,9 +171,38 @@ you want if you are managing parameters yourself.
 
 ## Solving
 
+### `solver([{ tol = 1e-9, maxIter = 200 }]) → { step, report, state }`
+
+**The loop is yours.** `solver()` hands back something you advance a step at a
+time; it never blocks and it never decides how long it may run.
+
+```js
+const run = S.solver();
+while (!run.step().done) { /* yield, cancel, redraw — your call */ }
+const r = run.report();
+```
+
+`step()` performs one Levenberg–Marquardt iteration — a Jacobian, a
+normal-equation solve, and however many damping attempts it takes to find a
+step that helps — then **writes the result back into the sketch**, so you can
+read the geometry between steps and draw it settling. It returns
+`{ done, stalled, converged, iteration, residual }`.
+
+`stalled` means no damping found an improving step: the sketch cannot get
+better from here, which is what an over-constrained one does. It stops rather
+than burning through `maxIter`.
+
+`report()` gives the full diagnosis from wherever the stepping got to, and is
+honest about a solve you stopped early — `converged` will say `false`. You can
+keep stepping afterwards.
+
 ### `solve([{ tol = 1e-9, maxIter = 200 }]) → report`
-Levenberg–Marquardt over numerically differentiated residuals. Moves the
-sketch to the solution and returns the report.
+A `while` loop around `solver()`, for when you have no frame budget to
+protect. This is the convenience; `solver()` is the primitive.
+
+`maxIter: 0` is a legitimate request — it runs no iterations and moves
+nothing, which combined with `report()` is another way to ask
+[`diagnose()`](#diagnose--report)'s question.
 
 ### `diagnose() → report`
 The same report **without moving anything** — for a live degree-of-freedom

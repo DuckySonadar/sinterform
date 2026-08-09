@@ -652,81 +652,117 @@ Sketch.prototype._free = function () {
   return idx;
 };
 
-// Levenberg-Marquardt. Gauss-Newton alone walks off a cliff the moment a
-// sketch is near-singular, which is most of the interesting ones.
-Sketch.prototype.solve = function (opts) {
+// Levenberg-Marquardt, one iteration at a time. Gauss-Newton alone walks off
+// a cliff the moment a sketch is near-singular, which is most of the
+// interesting ones.
+//
+// The loop belongs to the caller. `solver()` hands back something that can be
+// advanced one step, and `solve()` below is nothing but a `while` around it --
+// which is the right way round for a kernel: it should be *called*, not run.
+// Owning the loop would mean owning the answers to questions that are not
+// geometry's to answer. How long may this block for? May the user cancel it?
+// Should the sketch be redrawn while it settles? A caller with a hand on the
+// step can answer all three; one handed a function that returns when it feels
+// like it can answer none.
+//
+// Each accepted step writes back to the sketch, so a consumer can read the
+// geometry between steps and draw it.
+Sketch.prototype.solver = function (opts) {
   opts = opts || {};
+  const S = this;
   const tol = opts.tol || 1e-9;
-  const maxIter = opts.maxIter || 200;
-  const free = this._free();
+  const maxIter = opts.maxIter === undefined ? 200 : opts.maxIter;
+  const free = S._free();
   const n = free.length;
-  const m = this.cons.reduce((s, c) => s + c.n, 0);
-  const x = Float64Array.from(this.x);
-  const r = new Float64Array(m), r2 = new Float64Array(m);
+  const m = S.cons.reduce((s, c) => s + c.n, 0);
+  const x = Float64Array.from(S.x);
+  const r = new Float64Array(m), r2 = new Float64Array(m), plus = new Float64Array(m);
   const J = new Float64Array(m * n);
   const A = new Float64Array(n * n), g = new Float64Array(n), step = new Float64Array(n);
-
-  if (!m) return this._report(x, free, J, 0, 0, 0, true);
-
   const norm = (v) => { let s = 0; for (let i = 0; i < v.length; i++) s += v[i] * v[i]; return Math.sqrt(s); };
-  this.residuals(x, r);
-  let f = norm(r), lambda = 1e-3, iter = 0;
 
-  const plus = new Float64Array(m);
-  for (; iter < maxIter && f > tol; iter++) {
-    this._jac(x, free, J, m, r2, plus);
-    // normal equations
-    for (let i = 0; i < n; i++) {
-      g[i] = 0;
-      for (let k = 0; k < m; k++) g[i] -= J[k * n + i] * r[k];
-      for (let j = 0; j <= i; j++) {
-        let s = 0;
-        for (let k = 0; k < m; k++) s += J[k * n + i] * J[k * n + j];
-        A[i * n + j] = A[j * n + i] = s;
+  let f = 0, lambda = 1e-3, iter = 0, done = !m, stalled = false;
+  if (m) { S.residuals(x, r); f = norm(r); }
+
+  const flush = () => { for (let i = 0; i < x.length; i++) S.x[i] = x[i]; };
+  const state = () => ({ done, stalled, iteration: iter, residual: f,
+                         converged: f <= Math.max(tol, 1e-7) });
+
+  return {
+    // One Levenberg-Marquardt iteration: a Jacobian, a normal-equation solve,
+    // and however many damping attempts it takes to find a step that helps.
+    // That search is bounded and is part of one step, not a loop of its own.
+    step() {
+      if (done) return state();
+      if (f <= tol || iter >= maxIter) { done = true; return state(); }
+      S._jac(x, free, J, m, r2, plus);
+      for (let i = 0; i < n; i++) {
+        g[i] = 0;
+        for (let k = 0; k < m; k++) g[i] -= J[k * n + i] * r[k];
+        for (let j = 0; j <= i; j++) {
+          let s = 0;
+          for (let k = 0; k < m; k++) s += J[k * n + i] * J[k * n + j];
+          A[i * n + j] = A[j * n + i] = s;
+        }
       }
-    }
-    // Damp isotropically -- lambda * max(diag), not Marquardt's lambda *
-    // diag(J'J).
-    //
-    // Per-coordinate damping is the textbook choice and it is the wrong one
-    // here. A sketch is nearly always rank-deficient (four coordinates, one
-    // constraint), and scaling the damping by each diagonal entry means the
-    // directions with the least curvature get the least damping, so the step
-    // runs furthest exactly where it knows least. Asked to make two lines
-    // perpendicular it would return a step that stretched one of them to
-    // 500 mm instead of rotating it, and then converge linearly at a third
-    // per iteration because the gradient weakens as the line grows.
-    //
-    // One number for the whole matrix keeps the step near the minimum-norm
-    // Newton step, which solves that case exactly, in one iteration.
-    let dmax = 0;
-    for (let i = 0; i < n; i++) dmax = Math.max(dmax, A[i * n + i]);
-    if (!(dmax > 0)) dmax = 1;
-    let accepted = false;
-    for (let attempt = 0; attempt < 12 && !accepted; attempt++) {
-      const Ad = Float64Array.from(A);
-      for (let i = 0; i < n; i++) Ad[i * n + i] += lambda * dmax;
-      step.set(g);
-      if (!solveInPlace(Ad, step, n)) { lambda *= 8; continue; }
-      const trial = Float64Array.from(x);
-      for (let j = 0; j < n; j++) trial[free[j]] += step[j];
-      this.residuals(trial, r2);
-      const f2 = norm(r2);
-      if (f2 < f) {
-        x.set(trial); r.set(r2); f = f2;
-        lambda = Math.max(lambda / 3, 1e-12);
-        accepted = true;
-      } else lambda *= 8;
-    }
-    if (!accepted) break;
-  }
+      // Damp isotropically -- lambda * max(diag), not Marquardt's lambda *
+      // diag(J'J).
+      //
+      // Per-coordinate damping is the textbook choice and it is the wrong one
+      // here. A sketch is nearly always rank-deficient (four coordinates, one
+      // constraint), and scaling the damping by each diagonal entry means the
+      // directions with the least curvature get the least damping, so the step
+      // runs furthest exactly where it knows least. Asked to make two lines
+      // perpendicular it would return a step that stretched one of them to
+      // 500 mm instead of rotating it, and then converge linearly at a third
+      // per iteration because the gradient weakens as the line grows.
+      //
+      // One number for the whole matrix keeps the step near the minimum-norm
+      // Newton step, which solves that case exactly, in one iteration.
+      let dmax = 0;
+      for (let i = 0; i < n; i++) dmax = Math.max(dmax, A[i * n + i]);
+      if (!(dmax > 0)) dmax = 1;
+      let accepted = false;
+      for (let attempt = 0; attempt < 12 && !accepted; attempt++) {
+        const Ad = Float64Array.from(A);
+        for (let i = 0; i < n; i++) Ad[i * n + i] += lambda * dmax;
+        step.set(g);
+        if (!solveInPlace(Ad, step, n)) { lambda *= 8; continue; }
+        const trial = Float64Array.from(x);
+        for (let j = 0; j < n; j++) trial[free[j]] += step[j];
+        S.residuals(trial, r2);
+        const f2 = norm(r2);
+        if (f2 < f) {
+          x.set(trial); r.set(r2); f = f2;
+          lambda = Math.max(lambda / 3, 1e-12);
+          accepted = true;
+        } else lambda *= 8;
+      }
+      if (!accepted) { done = true; stalled = true; return state(); }
+      iter++;
+      flush();
+      if (f <= tol || iter >= maxIter) done = true;
+      return state();
+    },
 
-  for (let i = 0; i < x.length; i++) this.x[i] = x[i];
-  // The rank has to be read at the solution, not from whatever the last
-  // iteration left behind -- and there may have been no iterations at all,
-  // if the sketch was already satisfied when it arrived.
-  this._jac(x, free, J, m, r2, plus);
-  return this._report(x, free, J, m, f, iter, f <= Math.max(tol, 1e-7));
+    // The full diagnosis, from wherever the stepping got to. Honest about a
+    // solve that was stopped early: `converged` will say so.
+    report() {
+      flush();
+      if (m && n) S._jac(x, free, J, m, r2, plus);
+      return S._report(x, free, J, m, f, iter, f <= Math.max(tol, 1e-7));
+    },
+
+    get state() { return state(); }
+  };
+};
+
+// Run it to completion. This is the convenience, not the primitive -- anything
+// with a frame budget should drive `solver()` itself.
+Sketch.prototype.solve = function (opts) {
+  const run = this.solver(opts);
+  while (!run.step().done) { /* the caller's loop, kept short */ }
+  return run.report();
 };
 
 // Central differences. The residuals contain atan2 and normalised cross

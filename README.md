@@ -203,6 +203,8 @@ const ln = S.line(a, b);
 S.constrain('horizontal', { e: ln });
 S.constrain('distance', { p: a }, { p: b }, 20);
 S.solve();            // → { converged, dof, rank, redundant, conflicting, … }
+// …or drive it yourself, a step per frame, so nothing blocks:
+//   const run = S.solver();  while (!run.step().done) { draw(); await frame(); }
 S.get(b);             // → { kind: 'point', x: 20, y: 0, fixed: false, … }
 ```
 
