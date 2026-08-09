@@ -2,7 +2,16 @@
 
 A signed-distance geometry kernel for solid modelling: primitives, booleans
 with smooth blends, baked distance fields, a surface-nets mesher and binary
-STL output. About 470 lines of dependency-free JavaScript.
+STL output. Dependency-free JavaScript.
+
+| file | what |
+| --- | --- |
+| `sinterform.js` | the kernel — geometry, and nothing that knows a GPU exists |
+| `glsl.js` | the shader half of each primitive, and the two shader budgets |
+| `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
+
+They are separate because they are used separately: a mesher, a slicer or a
+test wants the first and not the second.
 
 It computes geometry and hands it back. There is no DOM in it, no WebGL, no
 storage, no state belonging to whatever is using it — which is what makes it
@@ -122,9 +131,23 @@ because it runs once per shape per sample.
 ### Tables
 
 `PRIMS` maps a key to a primitive: display `name`, its `dims`, defaults, a
-`glsl` source string, a `js` twin, and `ext` for bounds. `PRIM_KEYS` is its
-key list, `OPS` the boolean operations with labels, `MAXN` the shader's shape
-budget, and `RAD` is `π/180`.
+`js` implementation, and `ext` for bounds. `PRIM_KEYS` is its key list, `OPS`
+the boolean operations with labels, and `RAD` is `π/180`.
+
+The GLSL twin of each primitive lives in **`glsl.js`**, keyed the same way,
+along with `MAXN` (uniform slots, 3 vec4 per shape) and `MAXFIELDS` (3D
+texture units). Neither budget is a fact about geometry; both are facts about
+a fragment shader, which is why they moved:
+
+```js
+const GL = require('./glsl.js');
+GL.library(PRIM_KEYS)                       // the whole primitive function set
+GL.call('box', 'q', 'uD[5].xyz', 'uD[4].w') // → "pBox(q, uD[5].xyz, uD[4].w)"
+GL.samplerDecls()                           // the sampler3D declarations
+```
+
+`GL.call` knows the sampler-first calling convention baked primitives use, so
+a consumer does not have to.
 
 A dim is `[label, min, max, step, unit?]`. **No unit means millimetres, and
 millimetres are the only thing that scales** — multiplying a shape by 1.5 has
@@ -137,9 +160,11 @@ sounds: a raymarcher folds every shape into one `min`, so the loosest
 primitive in the library sets the step size for every ray in the scene.
 `check-primitives.mjs` prints the maximum safe step the set implies.
 
-To add a primitive, add an entry with both a `glsl` and a `js` implementation.
-They must agree; a mismatch shows up as a preview that disagrees with the
-exported mesh. `check-glsl.mjs` will tell you.
+To add a primitive, add a `js` entry in `sinterform.js` and a `glsl.js` entry
+with the same key. They must agree; a mismatch shows up as a preview that
+disagrees with the exported mesh. They used to sit side by side in one file,
+which was the only thing keeping them in step — now `check-glsl.mjs` is, and
+it also refuses a primitive present in one file and missing from the other.
 
 ### Baked fields
 
@@ -254,9 +279,11 @@ node check-glsl.mjs --require  # what CI should run
 ```
 
 Compiles the real GLSL on a real GPU, evaluates every primitive at 4096
-points, and compares against the JS at the same points. Two implementations
-sitting next to each other in the source was the only thing keeping them in
-step; this is the thing that checks.
+points, and compares against the JS at the same points. First it checks the
+two files describe the same set of primitives at all.
+
+This matters more since the split than it did before: the twins no longer sit
+next to each other, so nothing but this notices when they drift.
 
 It needs Playwright and a browser. The kernel does not depend on either and
 does not intend to, so without them the check reports that it skipped and

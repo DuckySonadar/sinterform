@@ -3,10 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Primitives, boolean operations with smooth blends, bodies, baked distance
- * fields, GLSL sources for a raymarcher, a surface-nets mesher and binary STL
- * output. No DOM, no WebGL, no storage: it computes geometry and hands it
- * back. That is what makes it liftable into its own repository, and what
- * keeps it usable from node -- which is how it gets tested.
+ * fields, a surface-nets mesher and binary STL output. No DOM, no WebGL, no
+ * storage: it computes geometry and hands it back. That is what makes it
+ * liftable into its own repository, and what keeps it usable from node --
+ * which is how it gets tested.
+ *
+ * Nothing here knows that a GPU exists. The shader half of each primitive
+ * lives in glsl.js, along with the two budgets that are facts about a
+ * fragment shader rather than about geometry.
  *
  * This block is the whole of it. Everything past the end of this script
  * element is the MetaMeld(TM) application, which is separately licensed; the
@@ -20,11 +24,13 @@
 (function (root) {
 "use strict";
 // ======================================================================
-// SDF core — every primitive is written twice, GLSL for the live preview
-// and JS for the mesher. They sit side by side so they stay in step.
-// Units are millimeters, +Z is up, z = 0 is the build plate.
+// SDF core. Units are millimetres, +Z is up, z = 0 is the build plate.
+//
+// Every primitive is written twice -- here in JS, and in GLSL in glsl.js for
+// anything that wants to draw it. They used to sit side by side, which was
+// the only thing keeping them in step; now that they do not, check-glsl.mjs
+// is what keeps them in step, and it compiles the real shader to do it.
 // ======================================================================
-const MAXN = 32;                      // uniform slots: 3 vec4 per shape
 
 // ======================================================================
 // baked fields
@@ -40,7 +46,6 @@ const MAXN = 32;                      // uniform slots: 3 vec4 per shape
 // refers to it. Samples are one byte each: 0..255 across +/-`range` mm, which
 // is ~0.06 mm at the 8 mm range the exporter uses -- far finer than the grid
 // spacing, so the quantisation is never the limit.
-const MAXFIELDS = 4;     // one 3D texture each; the shader declares this many
 let fields = [];         // [{ name, nx, ny, nz, box:[hx,hy,hz], range, data, tex }]
 
 function decodeField(f) {
@@ -94,23 +99,17 @@ function sampleField(f, x, y, z) {
 
 const PRIMS = {
   sphere: {
-    name: 'Sphere', fn: 'pSphere', round: false,
+    name: 'Sphere', round: false,
     dims: [['Radius', 0.5, 80, 0.5]],
     def: [10, 0, 0],
-    glsl: 'float pSphere(vec3 p, vec3 d, float r){ return length(p)-d.x; }',
     js: (p, d) => Math.hypot(p[0], p[1], p[2]) - d[0],
     ext: d => [d[0], d[0], d[0]]
   },
   box: {
-    name: 'Box', fn: 'pBox', round: true,
+    name: 'Box', round: true,
     dims: [['Size X', 0.5, 160, 0.5], ['Size Y', 0.5, 160, 0.5],
            ['Size Z', 0.5, 160, 0.5]],
     def: [20, 20, 20],
-    glsl: `float pBox(vec3 p, vec3 d, float r){
-  vec3 b = max(d*0.5 - r, vec3(0.0));
-  vec3 q = abs(p) - b;
-  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
-}`,
     js: (p, d, r) => {
       const b = [Math.max(d[0] * .5 - r, 0), Math.max(d[1] * .5 - r, 0),
                  Math.max(d[2] * .5 - r, 0)];
@@ -122,14 +121,9 @@ const PRIMS = {
     ext: d => [d[0] / 2, d[1] / 2, d[2] / 2]
   },
   cylinder: {
-    name: 'Cylinder', fn: 'pCyl', round: true,
+    name: 'Cylinder', round: true,
     dims: [['Radius', 0.5, 80, 0.5], ['Height', 0.5, 160, 0.5]],
     def: [10, 24, 0],
-    glsl: `float pCyl(vec3 p, vec3 d, float r){
-  float rr = max(d.x - r, 0.0), hh = max(d.y*0.5 - r, 0.0);
-  vec2 q = vec2(length(p.xy) - rr, abs(p.z) - hh);
-  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
-}`,
     js: (p, d, r) => {
       const rr = Math.max(d[0] - r, 0), hh = Math.max(d[1] * .5 - r, 0);
       const qx = Math.hypot(p[0], p[1]) - rr, qy = Math.abs(p[2]) - hh;
@@ -139,14 +133,9 @@ const PRIMS = {
     ext: d => [d[0], d[0], d[1] / 2]
   },
   capsule: {
-    name: 'Capsule', fn: 'pCap', round: false,
+    name: 'Capsule', round: false,
     dims: [['Radius', 0.5, 60, 0.5], ['Length', 1, 200, 0.5]],
     def: [7, 40, 0],
-    glsl: `float pCap(vec3 p, vec3 d, float r){
-  float hh = max(d.y*0.5 - d.x, 0.0);
-  vec3 q = vec3(p.x, p.y, p.z - clamp(p.z, -hh, hh));
-  return length(q) - d.x;
-}`,
     js: (p, d) => {
       const hh = Math.max(d[1] * .5 - d[0], 0);
       const z = p[2] - Math.min(Math.max(p[2], -hh), hh);
@@ -155,33 +144,18 @@ const PRIMS = {
     ext: d => [d[0], d[0], Math.max(d[1] / 2, d[0])]
   },
   torus: {
-    name: 'Torus', fn: 'pTorus', round: false,
+    name: 'Torus', round: false,
     dims: [['Ring radius', 1, 80, 0.5], ['Tube radius', 0.4, 40, 0.25]],
     def: [14, 4, 0],
-    glsl: `float pTorus(vec3 p, vec3 d, float r){
-  vec2 q = vec2(length(p.xy) - d.x, p.z);
-  return length(q) - d.y;
-}`,
     js: (p, d) => Math.hypot(Math.hypot(p[0], p[1]) - d[0], p[2]) - d[1],
     ext: d => [d[0] + d[1], d[0] + d[1], d[1]]
   },
   cone: {
-    name: 'Cone', fn: 'pCone', round: true,
+    name: 'Cone', round: true,
     dims: [['Base radius', 0, 80, 0.5], ['Top radius', 0, 80, 0.5],
            ['Height', 0.5, 160, 0.5]],
     def: [14, 0, 28],
     // iq's capped cone: h is the half height, r1 the -Z cap, r2 the +Z cap
-    glsl: `float pCone(vec3 p, vec3 d, float r){
-  float r1 = max(d.x - r, 0.0), r2 = max(d.y - r, 0.0);
-  float h = max(d.z*0.5 - r, 0.0);
-  vec2 q = vec2(length(p.xy), p.z);
-  vec2 k1 = vec2(r2, h);
-  vec2 k2 = vec2(r2 - r1, 2.0*h);
-  vec2 ca = vec2(q.x - min(q.x, (q.y < 0.0) ? r1 : r2), abs(q.y) - h);
-  vec2 cb = q - k1 + k2*clamp(dot(k1 - q, k2)/dot(k2, k2), 0.0, 1.0);
-  float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
-  return s*sqrt(min(dot(ca, ca), dot(cb, cb))) - r;
-}`,
     js: (p, d, r) => {
       const r1 = Math.max(d[0] - r, 0), r2 = Math.max(d[1] - r, 0);
       const h = Math.max(d[2] * .5 - r, 0);
@@ -201,18 +175,11 @@ const PRIMS = {
     // reaches ~1.22, so a full step of it can overshoot the surface. Whatever
     // marches this library has to scale its steps by less than 1/that, and
     // check-primitives.mjs prints the figure the whole set implies.
-    name: 'Ellipsoid', fn: 'pEllip', round: false, exact: false,
+    name: 'Ellipsoid', round: false, exact: false,
     dims: [['Size X', 0.5, 160, 0.5], ['Size Y', 0.5, 160, 0.5],
            ['Size Z', 0.5, 160, 0.5]],
     def: [30, 18, 14],
     // iq's bound: not exact, so the marcher takes slightly shorter steps
-    glsl: `float pEllip(vec3 p, vec3 d, float r){
-  vec3 rr = max(d*0.5, vec3(1e-3));
-  float k0 = length(p/rr);
-  float k1 = length(p/(rr*rr));
-  if (k1 < 1e-6) return -min(rr.x, min(rr.y, rr.z));
-  return k0*(k0 - 1.0)/k1;
-}`,
     js: (p, d) => {
       const rx = Math.max(d[0] * .5, 1e-3), ry = Math.max(d[1] * .5, 1e-3),
             rz = Math.max(d[2] * .5, 1e-3);
@@ -227,23 +194,10 @@ const PRIMS = {
     // Regular n-gon extruded along Z. Folding the point into one wedge and
     // measuring to that wedge's edge segment is exact everywhere, vertices
     // included, which a max-of-half-planes would not be.
-    name: 'Prism', fn: 'pPrism', round: true,
+    name: 'Prism', round: true,
     dims: [['Radius', 0.5, 80, 0.5], ['Height', 0.5, 160, 0.5],
            ['Sides', 3, 12, 1, '']],
     def: [12, 24, 6],
-    glsl: `float pPrism(vec3 p, vec3 d, float r){
-  float n = clamp(floor(d.z + 0.5), 3.0, 12.0);
-  float ang = 3.14159265359/n;
-  float R = max(d.x - r/cos(ang), 0.0);
-  float hh = max(d.y*0.5 - r, 0.0);
-  float a = atan(p.y, p.x);
-  a = mod(a + ang, 2.0*ang) - ang;
-  vec2 q = length(p.xy)*vec2(cos(a), sin(a));
-  float ap = R*cos(ang), hl = R*sin(ang);
-  float e = length(vec2(q.x - ap, q.y - clamp(q.y, -hl, hl)));
-  vec2 w = vec2(q.x < ap ? -e : e, abs(p.z) - hh);
-  return min(max(w.x, w.y), 0.0) + length(max(w, 0.0)) - r;
-}`,
     js: (p, d, r) => {
       const n = Math.min(Math.max(Math.round(d[2]), 3), 12);
       const ang = Math.PI / n;
@@ -273,29 +227,9 @@ const PRIMS = {
     // it is touching. Over-estimating is the direction that tunnels -- the
     // marcher takes the whole step and passes through the solid. So the base
     // is intersected in properly, as max() against its half-space.
-    name: 'Pyramid', fn: 'pPyr', round: false,
+    name: 'Pyramid', round: false,
     dims: [['Base', 0.5, 160, 0.5], ['Height', 0.5, 160, 0.5]],
     def: [24, 26, 0],
-    glsl: `float pPyr(vec3 p, vec3 d, float r){
-  float b = max(d.x, 1e-4), H = max(d.y, 1e-4);
-  vec3 P = vec3(p.x, p.z + H*0.5, p.y)/b;
-  float h = H/b;
-  float m2 = h*h + 0.25;
-  P.xz = abs(P.xz);
-  P.xz = (P.z > P.x) ? P.zx : P.xz;
-  P.xz -= 0.5;
-  vec3 q = vec3(P.z, h*P.y - 0.5*P.x, h*P.x + 0.5*P.y);
-  float s = max(-q.x, 0.0);
-  float t = clamp((q.y - 0.5*P.z)/(m2 + 0.25), 0.0, 1.0);
-  float A = m2*(q.x + s)*(q.x + s) + q.y*q.y;
-  float B = m2*(q.x + 0.5*t)*(q.x + 0.5*t) + (q.y - m2*t)*(q.y - m2*t);
-  float d2 = min(q.y, -q.x*m2 - q.y*0.5) > 0.0 ? 0.0 : min(A, B);
-  float lat = sqrt((d2 + q.z*q.z)/m2);
-  float e2 = length(max(vec2(P.x, P.z), 0.0)) + min(P.x, 0.0);
-  float base = length(vec2(max(e2, 0.0), P.y));
-  float m = min(lat, base);
-  return ((q.z < 0.0 && P.y > 0.0) ? -m : m)*b;
-}`,
     js: (p, d) => {
       const b = Math.max(d[0], 1e-4), H = Math.max(d[1], 1e-4);
       let Px = p[0] / b, Py = (p[2] + H * .5) / b, Pz = p[1] / b;
@@ -321,21 +255,9 @@ const PRIMS = {
     // |x|+|y|+|z| = s is the cheap bound everyone reaches for; this is iq's
     // exact form, which matters because a loose primitive shortens the step
     // for every ray in the scene, not just the ones near it.
-    name: 'Octahedron', fn: 'pOcta', round: true,
+    name: 'Octahedron', round: true,
     dims: [['Size', 0.5, 100, 0.5]],
     def: [16, 0, 0],
-    glsl: `float pOcta(vec3 p, vec3 d, float r){
-  float s = max(d.x - r*1.73205081, 0.0);
-  p = abs(p);
-  float m = p.x + p.y + p.z - s;
-  vec3 q;
-       if (3.0*p.x < m) q = p.xyz;
-  else if (3.0*p.y < m) q = p.yzx;
-  else if (3.0*p.z < m) q = p.zxy;
-  else return m*0.57735027 - r;
-  float k = clamp(0.5*(q.z - q.y + s), 0.0, s);
-  return length(vec3(q.x, q.y - s + k, q.z - k)) - r;
-}`,
     js: (p, d, r) => {
       const s = Math.max(d[0] - r * 1.73205081, 0);
       const px = Math.abs(p[0]), py = Math.abs(p[1]), pz = Math.abs(p[2]);
@@ -353,17 +275,9 @@ const PRIMS = {
   dome: {
     // A sphere with everything above local z = `cut` taken off. Negative cut
     // leaves less than a hemisphere, positive more; at -radius it vanishes.
-    name: 'Dome', fn: 'pDome', round: false,
+    name: 'Dome', round: false,
     dims: [['Radius', 0.5, 80, 0.5], ['Cut height', -80, 80, 0.5]],
     def: [16, 0, 0],
-    glsl: `float pDome(vec3 p, vec3 d, float r){
-  float R = max(d.x, 1e-4);
-  float h = clamp(d.y, -R, R);
-  float w = sqrt(max(R*R - h*h, 0.0));
-  vec2 q = vec2(length(p.xy), p.z);
-  float s = max((h - R)*q.x*q.x + w*w*(h + R - 2.0*q.y), h*q.x - w*q.y);
-  return (s < 0.0) ? length(q) - R : (q.x < w) ? h - q.y : length(q - vec2(w, h));
-}`,
     js: (p, d) => {
       const R = Math.max(d[0], 1e-4);
       const h = Math.min(Math.max(d[1], -R), R);
@@ -382,17 +296,10 @@ const PRIMS = {
   arc: {
     // A torus swept through part of a turn instead of all of it -- the hinge
     // and spring shape. Opens symmetrically about local +Y.
-    name: 'Arc', fn: 'pArc', round: false,
+    name: 'Arc', round: false,
     dims: [['Ring radius', 1, 80, 0.5], ['Tube radius', 0.4, 40, 0.25],
            ['Sweep', 10, 360, 5, '°']],
     def: [14, 4, 180],
-    glsl: `float pArc(vec3 p, vec3 d, float r){
-  float th = clamp(d.z, 10.0, 360.0)*0.00872664626;
-  vec2 sc = vec2(sin(th), cos(th));
-  p.x = abs(p.x);
-  float k = (sc.y*p.x > sc.x*p.y) ? dot(p.xy, sc) : length(p.xy);
-  return sqrt(max(dot(p, p) + d.x*d.x - 2.0*d.x*k, 0.0)) - d.y;
-}`,
     js: (p, d) => {
       const th = Math.min(Math.max(d[2], 10), 360) * 0.00872664626;
       const sx = Math.sin(th), sy = Math.cos(th);
@@ -406,15 +313,10 @@ const PRIMS = {
   link: {
     // A chain link standing on end: the tube wraps a stadium in the XZ plane,
     // so the hole runs along Y and the next link threads through it.
-    name: 'Link', fn: 'pLink', round: false,
+    name: 'Link', round: false,
     dims: [['Length', 2, 120, 0.5], ['Ring radius', 0.5, 40, 0.25],
            ['Tube radius', 0.3, 20, 0.25]],
     def: [30, 6, 2.5],
-    glsl: `float pLink(vec3 p, vec3 d, float r){
-  float le = max(d.x*0.5 - d.y - d.z, 0.0);
-  vec3 q = vec3(p.x, max(abs(p.z) - le, 0.0), p.y);
-  return length(vec2(length(q.xy) - d.y, q.z)) - d.z;
-}`,
     js: (p, d) => {
       const le = Math.max(d[0] * .5 - d[1] - d[2], 0);
       const qx = p[0], qy = Math.max(Math.abs(p[2]) - le, 0), qz = p[1];
@@ -423,11 +325,10 @@ const PRIMS = {
     ext: d => [d[1] + d[2], d[2], Math.max(d[0] / 2, d[1] + d[2])]
   },
   plane: {
-    name: 'Plane cut', fn: 'pPlane', round: false, infinite: true,
+    name: 'Plane cut', round: false, infinite: true,
     dims: [],
     def: [0, 0, 0],
     // solid below local +Z: as a Cut it shaves everything above the plane
-    glsl: 'float pPlane(vec3 p, vec3 d, float r){ return p.z; }',
     js: p => p[2],
     ext: () => [1e4, 1e4, 1e4]
   },
@@ -437,21 +338,11 @@ const PRIMS = {
     // the sampler clamps to the edge, which would read as solid forever, so
     // the box distance is maxed in: outside, the box wins and the marcher
     // still converges; inside, the sampled field does.
-    name: 'Baked', fn: 'pFieldS', round: false, baked: true,
+    name: 'Baked', round: false, baked: true,
     dims: [],
     def: [0, 0, 0],
     // GLSL ES 3.0 allows a sampler as a function parameter, so one function
     // serves every slot and the generated call names its slot literally.
-    glsl: `float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
-  vec3 q = abs(p) - d;
-  float box = length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
-  if (d.x <= 0.0) return 1e9;
-  // the grid is stored with z fastest, so the texture is nz wide by ny by nx
-  // and the lookup is (z, y, x), not (x, y, z)
-  vec3 uvw = (p + d)/(2.0*d);
-  float v = (texture(s, clamp(uvw.zyx, 0.0, 1.0)).r*2.0 - 1.0)*r;
-  return max(v, box);
-}`,
     js: (p, d, r, n) => {
       const f = fields[(n && n.fi) || 0];
       if (!f) return 1e9;
@@ -674,7 +565,7 @@ function meshToSTL(m, header) {
 // symptom would be a baked shape that renders as the one you opened before.
 // ----------------------------------------------------------------------
 const SinterForm = {
-  MAXN, MAXFIELDS, PRIMS, PRIM_KEYS, OPS, RAD, dimIsLength, dimUnit,
+  PRIMS, PRIM_KEYS, OPS, RAD, dimIsLength, dimUnit,
   get fields() { return fields; },
   set fields(v) { fields = v; },
   decodeField, encodeField, sampleField,

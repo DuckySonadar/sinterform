@@ -36,6 +36,9 @@ const N = 64;              // N*N points per primitive
 const mod = { exports: {} };
 new Function('module', readFileSync(join(HERE, 'sinterform.js'), 'utf8'))(mod);
 const SF = mod.exports;
+const gmod = { exports: {} };
+new Function('module', readFileSync(join(HERE, 'glsl.js'), 'utf8'))(gmod);
+const GL = gmod.exports;
 
 let chromium;
 for (const cand of [process.env.PLAYWRIGHT_MODULE,
@@ -53,6 +56,18 @@ if (!chromium) {
   if (REQUIRE) { console.error(msg); process.exit(1); }
   console.log(`${msg}\n  npm i playwright   (then re-run; --require makes this fatal)`);
   process.exit(0);
+}
+
+// The two files have to describe the same set of primitives. Since they are
+// no longer one file, this is the first thing that can drift -- a primitive
+// added to one and not the other -- and it is cheap to catch.
+const onlyJs = SF.PRIM_KEYS.filter(k => !GL.GLSL[k]);
+const onlyGl = GL.KEYS.filter(k => !SF.PRIMS[k]);
+if (onlyJs.length || onlyGl.length) {
+  console.error('the two halves disagree about which primitives exist:');
+  if (onlyJs.length) console.error(`  only in sinterform.js: ${onlyJs.join(', ')}`);
+  if (onlyGl.length) console.error(`  only in glsl.js:       ${onlyGl.join(', ')}`);
+  process.exit(1);
 }
 
 // Everything but the baked field, which needs a 3D texture and real samples.
@@ -76,7 +91,7 @@ const cases = KEYS.map(k => {
     pts[4 * i + 1] = (rnd() * 2 - 1) * E[1] * 1.7;
     pts[4 * i + 2] = (rnd() * 2 - 1) * E[2] * 1.7;
   }
-  return { key: k, fn: P.fn, glsl: P.glsl, name: P.name, d, r, pts };
+  return { key: k, fn: GL.GLSL[k].fn, glsl: GL.GLSL[k].src, name: P.name, d, r, pts };
 });
 
 const browser = await chromium.launch({
@@ -169,7 +184,8 @@ const ok = (cond, msg) => {
 };
 
 if (got.error) { console.error(`check-glsl: ${got.error}`); process.exit(1); }
-console.log(`SinterForm GLSL/JS twins — ${N * N} points each\n`);
+console.log(`SinterForm GLSL/JS twins — ${N * N} points each`);
+console.log(`glsl.js and sinterform.js agree on all ${SF.PRIM_KEYS.length} primitives\n`);
 
 for (const c of cases) {
   const R = got.results[c.key];

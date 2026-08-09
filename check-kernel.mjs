@@ -80,6 +80,26 @@ try {
 const SF = mod.exports;
 ok(typeof SF === 'object' && SF.PRIMS, 'kernel exports a namespace via module.exports');
 
+// The shader half lives in glsl.js now. It gets inlined into the same HTML,
+// so it carries the same closing-tag hazard -- and it is the likelier of the
+// two to acquire one, being full of shader source pasted in from elsewhere.
+// Checking it here rather than in check-glsl.mjs is deliberate: that one needs
+// a browser and is allowed to skip, and this hazard must never go unchecked.
+if (!process.argv[2]) {
+  const g = readFileSync(join(HERE, 'glsl.js'), 'utf8');
+  ok(!g.includes(CLOSE), 'glsl.js contains no closing script tag either');
+  const gmod = { exports: {} };
+  let threw = null;
+  try { new Function('module', g)(gmod); } catch (e) { threw = e; }
+  ok(!threw, `glsl.js runs under node${threw ? ` — ${threw.message}` : ''}`);
+  const GL = gmod.exports || {};
+  ok(GL.KEYS && GL.KEYS.length === SF.PRIM_KEYS.length,
+     `and covers all ${SF.PRIM_KEYS.length} primitives the kernel registers`
+     + (GL.KEYS ? ` (${GL.KEYS.length})` : ''));
+  ok(SF.PRIM_KEYS.every(k2 => GL.GLSL && GL.GLSL[k2]),
+     'with no primitive present in one file and missing from the other');
+}
+
 // ---- 3. it computes the geometry it is supposed to --------------------
 const node = (over) => Object.assign(
   { t: 'sphere', on: true, op: 'add', k: 0, b: 0, tg: null, fi: 0,
