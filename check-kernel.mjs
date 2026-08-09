@@ -70,22 +70,36 @@ for (const re of FORBIDDEN) {
 ok(!kernel.includes(CLOSE), 'kernel contains no closing script tag');
 
 // ---- 2. it runs with no browser at all --------------------------------
+// Two things get evaluated here, and which one depends on the target. A bare
+// sinterform.js is one module. The built HTML is sinterform.js *and* glsl.js
+// spliced into one script element, and both end with `module.exports = ...`,
+// so under node the second would simply overwrite the first. That is not a
+// bug in the build -- in a browser each attaches to its own global and both
+// survive -- but it does mean the namespace has to be read the way a browser
+// reads it, off the global, rather than off module.exports.
 const mod = { exports: {} };
+const globals = {};
 try {
-  new Function('module', kernel)(mod);
+  new Function('module', 'self', kernel)(mod, globals);
 } catch (e) {
   console.log(`  FAIL  kernel throws under node: ${e.message}`);
   process.exit(1);
 }
-const SF = mod.exports;
-ok(typeof SF === 'object' && SF.PRIMS, 'kernel exports a namespace via module.exports');
+const SF = globals.SinterForm;
+ok(typeof SF === 'object' && SF && SF.PRIMS, 'kernel exports a SinterForm namespace');
+if (!TARGET.endsWith('.html'))
+  ok(mod.exports === SF, 'and the node require() path returns the same object');
+else
+  ok(globals.SinterFormGLSL && globals.SinterFormGLSL.KEYS,
+     'the built file carries the GLSL module alongside the kernel');
+if (!SF || !SF.PRIMS) { console.log('\ncannot continue without a namespace'); process.exit(1); }
 
 // The shader half lives in glsl.js now. It gets inlined into the same HTML,
 // so it carries the same closing-tag hazard -- and it is the likelier of the
 // two to acquire one, being full of shader source pasted in from elsewhere.
 // Checking it here rather than in check-glsl.mjs is deliberate: that one needs
 // a browser and is allowed to skip, and this hazard must never go unchecked.
-if (!process.argv[2]) {
+if (!TARGET.endsWith('.html')) {
   const g = readFileSync(join(HERE, 'glsl.js'), 'utf8');
   ok(!g.includes(CLOSE), 'glsl.js contains no closing script tag either');
   const gmod = { exports: {} };
