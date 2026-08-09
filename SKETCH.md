@@ -64,15 +64,17 @@ A **ref** names something a constraint can talk about.
 | --- | --- | --- |
 | `{ p: id }` | point source | a point entity |
 | `{ e: id }` | both, for some kinds | a whole entity: a line's direction, an arc's centre, a curve's size |
-| `{ e: id, t: paramId }` | both | a location on an entity at a solved parameter — a **position** and a **tangent** |
+| `{ e: id, t: paramId }` | both | a location on an entity at a solved parameter — a **position** and a **tangent**. The parameter is an unknown the solver moves |
+| `{ e: id, end: 0\|1 }` | both | a curve's **drawn** end — where it stops being drawn, rather than where something touches it. See [Profiles](#profiles--getting-to-something-extrudable) |
 
-- A **direction source** is `{ e: lineId }` or `{ e: anyId, t }`.
-- A **point source** is `{ p: id }`, `{ e: pointId }`, or `{ e: anyId, t }`.
+- A **direction source** is `{ e: lineId }`, `{ e: anyId, t }` or `{ e: anyId, end }`.
+- A **point source** is `{ p: id }`, `{ e: pointId }`, `{ e: anyId, t }` or
+  `{ e: anyId, end }`.
 
 A bare integer is accepted anywhere a ref is and means `{ e: id }`.
 
-Asking a curve for a direction or a position without a `t` throws
-`ref has no direction — a curve needs a parameter: {e, t}`.
+Asking a curve for a direction or a position with neither `t` nor `end`
+throws `ref has no direction — a curve needs {t} or {end}`.
 
 ---
 
@@ -418,8 +420,9 @@ Thrown, not returned:
 
 - `no such constraint: <kind>`
 - `no entity <id>`
-- `ref has no direction — a curve needs a parameter: {e, t}`
-- `ref has no position — a curve needs a parameter: {e, t}`
+- `ref has no direction — a curve needs {t} or {end}`
+- `ref has no position — a curve needs {t} or {end}`
+- `entity <id> (<kind>) has no ends` — asking a point or a param for an endpoint
 - `entity <id> (<kind>) has no parameterisation` — asking a point for a curve
 - `entity <id> (<kind>) has no centre`
 - `collinear wants two lines` · `equal wants two lines or two arcs` ·
