@@ -9,6 +9,7 @@ STL output. Dependency-free JavaScript.
 | `sinterform.js` | the kernel — geometry, and nothing that knows a GPU exists |
 | `glsl.js` | the shader half of each primitive, and the two shader budgets |
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
+| `sweep.js` | a profile dragged along a sketch path, at a scale that may vary |
 | `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
 
 They are separate because they are used separately: a mesher, a slicer or a
@@ -263,6 +264,74 @@ characteristics worth knowing about before relying on it.
 
 ```
 node check-sketch.mjs      # 110 assertions
+```
+
+## Sweeps (`sweep.js`)
+
+Take a path in the XY plane — anything `sketch.js` can sample, open or closed
+— and drag a 2D profile along it, at a scale that may change as it goes.
+
+```js
+const SW = require('./sweep.js');
+const f = SW.fromSketch(S, { entity: curveId }, SW.PROFILES.circle(4),
+                        { scale: (t) => 1 + 2 * t });
+f(x, y, z);        // mm
+f.bounds;          // { lo, hi }, ready for surfaceNets
+f.exact;           // false once the scale varies — see below
+```
+
+A profile is any `(u, v) → mm`, with `u` across the path and `v` up;
+`PROFILES.circle`, `.rect` and `.halfCircle` cover the usual ones. `scale`
+takes a number, a function of arc length in `[0, 1]`, or one factor per path
+point.
+
+### Self-intersection is not a special case
+
+A swept solid is the **union** of the profile over the path. Union is `min`,
+and `min` does not care how many times a point is covered — covered once is
+negative, covered five times is still negative. A path that crosses itself,
+doubles back or coils is the ordinary case with more terms in the min.
+
+That is true of the union, and it is worth being exact about, because it is
+not how sweeps are usually written. The cheap way attaches the profile to the
+**nearest** path point: one lookup instead of a loop, and wrong wherever the
+nearest pass is not the covering pass. `check-sweep.mjs` implements that
+version alongside and points both at the same geometry — on a self-crossing
+path with a one-sided profile it loses material in 9,504 of 200,000 samples,
+gains it past the ends it cannot cap, and is not 1-Lipschitz, so a marcher
+can step through it.
+
+The price of the union is O(path segments) per sample instead of O(1).
+Affordable for a mesher; the thing to watch for a raymarcher.
+
+### What is exact
+
+At constant scale the result is a true distance: 1-Lipschitz, and it
+reproduces the analytic shapes — a circle along a line is a cylinder to 1e-9,
+a circle along a circle is `PRIMS.torus`, a swept torus meshes watertight
+within 0.4% of 2π²Rr².
+
+**Varying the scale makes it a bound rather than a distance**, and nothing
+puts that back: a tapered surface is slanted, and the profile's distance is
+measured across the sweep rather than square to the slant. Dividing out the
+secant restores a *safe* bound — outside it never reports further than the
+truth, so a marcher cannot step through it; inside it under-reports depth by
+up to half a millimetre on a steep taper, which is the conservative
+direction.
+
+### Joins and caps
+
+The ends of an open path are capped flat with the profile, which is what a
+sweep means; rounded ends would be a capsule and a different operation.
+Joints between segments are **rounded**, because two segments meeting at a
+convex corner leave a wedge that is past the end of one and before the start
+of the other — on a finely sampled curve that wedge is a whisker wide, and
+the answer inside it was wrong by the entire depth of the profile. Where the
+path doubles back on itself, the joint is a real end of the material and is
+capped.
+
+```
+node check-sweep.mjs      # 36 assertions
 ```
 
 ## Inlining it into HTML
