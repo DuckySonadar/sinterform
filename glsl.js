@@ -4,10 +4,22 @@
  *
  * Every primitive in sinterform.js is written twice: once in JS, which is
  * geometry, and once in GLSL, which is a picture of geometry. Only the first
- * is the kernel's business. This file holds the second, and the two shader
- * budgets that come with it -- how many shapes fit in the uniforms, and how
- * many baked fields fit in texture units. Neither is a fact about geometry;
- * both are facts about a fragment shader.
+ * is the kernel's business. This file holds the second.
+ *
+ * It stays in this repository rather than moving to the application for two
+ * reasons. The functions are portable -- `pBox(vec3 p, vec3 d, float r)` says
+ * nothing about any particular renderer's camera, lighting or uniform layout,
+ * and the second consumer that wants a GPU preview needs exactly these and
+ * should not have to vendor an application to get them. And the twins have to
+ * be checkable against each other in one place: split across repositories,
+ * check-glsl.mjs could not run here at all, and adding a primitive would be
+ * two pull requests with a window in between where this repository ships a
+ * shape nothing can draw.
+ *
+ * What is *not* here is any budget. How many shapes fit in the uniforms and
+ * how many fields fit in texture units are decisions belonging to whoever
+ * packs the uniforms -- a consumer using an SSBO has no such limit -- so they
+ * are arguments, not constants.
  *
  * Splitting them apart costs one thing and buys another. The cost is that the
  * twins no longer sit side by side, which was the only mechanism keeping them
@@ -23,11 +35,6 @@
  */
 (function (root) {
 "use strict";
-
-// Shader budgets. MAXN is uniform slots -- 3 vec4 per shape. MAXFIELDS is
-// 3D texture units, and the shader declares exactly that many samplers.
-const MAXN = 32;
-const MAXFIELDS = 4;
 
 // key -> { fn, src, sampler? }. `sampler` marks a primitive whose GLSL takes
 // a sampler3D as its first argument, which changes how it is called.
@@ -177,20 +184,21 @@ function library(keys) {
 function call(key, point, dims, round, field) {
   const g = GLSL[key];
   if (!g) throw new Error('no GLSL for primitive: ' + key);
-  const slot = Math.min(Math.max(field | 0, 0), MAXFIELDS - 1);
   return g.sampler
-    ? `${g.fn}(uField${slot}, ${point}, ${dims}, ${round})`
+    ? `${g.fn}(uField${field | 0}, ${point}, ${dims}, ${round})`
     : `${g.fn}(${point}, ${dims}, ${round})`;
 }
 
-// The sampler declarations the library needs, given the budget.
-function samplerDecls() {
+// The sampler declarations the library needs. `count` is the caller's texture
+// budget: this file has no opinion about how many are affordable.
+// GLSL ES 3.0 has no default precision for sampler3D, so it is stated here.
+function samplerDecls(count) {
   let s = 'precision highp sampler3D;\n';
-  for (let i = 0; i < MAXFIELDS; i++) s += `uniform sampler3D uField${i};\n`;
+  for (let i = 0; i < (count | 0); i++) s += `uniform sampler3D uField${i};\n`;
   return s;
 }
 
-const SinterFormGLSL = { MAXN, MAXFIELDS, GLSL, library, call, samplerDecls,
+const SinterFormGLSL = { GLSL, library, call, samplerDecls,
                          KEYS: Object.keys(GLSL) };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterFormGLSL;
 root.SinterFormGLSL = SinterFormGLSL;

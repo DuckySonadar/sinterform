@@ -134,20 +134,23 @@ because it runs once per shape per sample.
 `js` implementation, and `ext` for bounds. `PRIM_KEYS` is its key list, `OPS`
 the boolean operations with labels, and `RAD` is `π/180`.
 
-The GLSL twin of each primitive lives in **`glsl.js`**, keyed the same way,
-along with `MAXN` (uniform slots, 3 vec4 per shape) and `MAXFIELDS` (3D
-texture units). Neither budget is a fact about geometry; both are facts about
-a fragment shader, which is why they moved:
+The GLSL twin of each primitive lives in **`glsl.js`**, keyed the same way:
 
 ```js
 const GL = require('./glsl.js');
 GL.library(PRIM_KEYS)                       // the whole primitive function set
 GL.call('box', 'q', 'uD[5].xyz', 'uD[4].w') // → "pBox(q, uD[5].xyz, uD[4].w)"
-GL.samplerDecls()                           // the sampler3D declarations
+GL.samplerDecls(4)                          // sampler3D declarations, 4 of them
 ```
 
 `GL.call` knows the sampler-first calling convention baked primitives use, so
-a consumer does not have to.
+a consumer does not have to. The uniform *expressions* are the caller's, which
+is what keeps the packing out of here.
+
+**No budgets live in this repository.** How many shapes fit in the uniforms
+and how many fields fit in texture units belong to whoever packs them — a
+consumer using an SSBO has neither limit — so they are arguments rather than
+constants. MetaMeld's own numbers are 32 shapes at 3 vec4 each, and 4 fields.
 
 A dim is `[label, min, max, step, unit?]`. **No unit means millimetres, and
 millimetres are the only thing that scales** — multiplying a shape by 1.5 has
