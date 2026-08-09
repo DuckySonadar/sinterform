@@ -545,5 +545,172 @@ console.log('\n--- a document survives a round trip ---');
   ok(threw, 'and an unversioned one is refused rather than half-read');
 }
 
+// ======================================================================
+console.log('\n--- profiles: a solved sketch is not yet something you can extrude ---');
+
+// A closed slot, built the way a profile has to be built: ends constrained
+// together, and tangency stated AT those shared ends rather than at contact
+// points the solver invents.
+function slot(R, L) {
+  const S = new Sketch();
+  const c1 = S.point(0, 0, { fixed: true }), c2 = S.point(L, 0, { fixed: true });
+  const a1 = S.arc(c1, R, R, 0, Math.PI / 2, 3 * Math.PI / 2);
+  const a2 = S.arc(c2, R, R, 0, -Math.PI / 2, Math.PI / 2);
+  const p4 = S.point(1, -R + 1), p3 = S.point(L - 1, -R - 1);
+  const p2 = S.point(L + 1, R + 1), p1 = S.point(-1, R - 1);
+  const bot = S.line(p4, p3), top = S.line(p2, p1);
+  S.constrain('circular', { e: a1 }); S.constrain('circular', { e: a2 });
+  S.constrain('radius', { e: a1 }, undefined, R);
+  S.constrain('radius', { e: a2 }, undefined, R);
+  S.constrain('coincident', { e: a1, end: 1 }, { e: bot, end: 0 });
+  S.constrain('coincident', { e: bot, end: 1 }, { e: a2, end: 0 });
+  S.constrain('coincident', { e: a2, end: 1 }, { e: top, end: 0 });
+  S.constrain('coincident', { e: top, end: 1 }, { e: a1, end: 0 });
+  S.constrain('parallel', { e: a1, end: 1 }, { e: bot });
+  S.constrain('parallel', { e: bot, end: 1 }, { e: a2, end: 0 });
+  S.constrain('parallel', { e: a2, end: 1 }, { e: top });
+  S.constrain('parallel', { e: top, end: 1 }, { e: a1, end: 0 });
+  return { S, r: S.solve({ maxIter: 600 }), ids: { a1, a2, top, bot } };
+}
+{
+  const R = 8, L = 38;
+  const { S, r } = slot(R, L);
+  ok(r.converged, `the slot solves (${r.equations} equations, ${r.variables} variables)`);
+  const prof = S.profile(0.005);
+  ok(prof.closed && prof.loops.length === 1 && prof.open === 0,
+     `one closed loop, nothing left dangling (${prof.loops.length} loops, ${prof.open} open)`);
+  ok(prof.loops[0].entities.length === 4, 'walked through all four curves');
+
+  // area must converge on the analytic stadium, and do it linearly in tol —
+  // which is what says the sampling is a chord approximation and not a bug
+  const want = L * 2 * R + Math.PI * R * R;
+  const errs = [0.02, 0.005, 0.001].map(t => Math.abs(Math.abs(S.profile(t).loops[0].area) - want));
+  ok(errs[0] > errs[1] && errs[1] > errs[2],
+     `area converges as the sampling refines (${errs.map(e => e.toExponential(1)).join(' → ')})`);
+  ok(errs[2] < 0.05, `and reaches the analytic stadium ${want.toFixed(3)} mm² (err ${errs[2].toExponential(1)})`);
+
+  // and the loop must come back anticlockwise, or every hole test is inverted
+  ok(prof.loops[0].area > 0, 'the outer loop is oriented anticlockwise');
+}
+{
+  const R = 8, L = 38;
+  const { S } = slot(R, L);
+  const f = S.sdf2d(0.001);
+  near(f(L / 2, 0), -R, 0.01, 'the middle of the slot is one radius deep');
+  near(f(0, 0), -R, 0.01, 'so is the centre of an end cap');
+  near(f(L / 2, 20), 20 - R, 0.01, 'a point above it is outside by the right amount');
+  near(f(-R - 5, 0), 5, 0.01, 'and one beyond the cap too');
+  near(f(L / 2, R), 0, 0.01, 'the flank is the zero level set');
+
+  // it feeds a raymarcher, so it has to be 1-Lipschitz
+  let worst = 0;
+  let seed = 12345;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let i = 0; i < 20000; i++) {
+    const ax = rnd() * 100 - 30, ay = rnd() * 80 - 40;
+    const bx = ax + rnd() * 8 - 4, by = ay + rnd() * 8 - 4;
+    const d = Math.hypot(bx - ax, by - ay);
+    if (d < 1e-9) continue;
+    worst = Math.max(worst, Math.abs(f(bx, by) - f(ax, ay)) / d);
+  }
+  ok(worst <= 1.002, `the 2D field is 1-Lipschitz (worst ${worst.toFixed(4)})`);
+}
+{
+  // a hole: two concentric full circles. A full circle's two ends are the
+  // same point, so it closes as a loop on its own.
+  const S = new Sketch();
+  const c = S.point(0, 0, { fixed: true });
+  const outer = S.arc(c, 20, 20, 0, 0, 2 * Math.PI);
+  const inner = S.arc(c, 8, 8, 0, 0, 2 * Math.PI);
+  S.fix(outer); S.fix(inner);
+  const prof = S.profile(0.002);
+  ok(prof.closed && prof.loops.length === 2,
+     `an annulus reads as two closed loops (${prof.loops.length})`);
+  ok(Math.abs(prof.loops[0].area) > Math.abs(prof.loops[1].area),
+     'biggest loop first, so the outer boundary is loop 0');
+  const f = S.sdf2d(0.002);
+  ok(f(14, 0) < 0, 'the ring is solid');
+  ok(f(0, 0) > 0, 'the hole is not');
+  near(f(0, 0), 8, 0.01, 'and the middle of the hole is 8 mm from material');
+  near(f(14, 0), -6, 0.01, 'the ring is deepest midway between the two radii');
+  near(Math.abs(prof.loops[0].area) - Math.abs(prof.loops[1].area),
+       Math.PI * (400 - 64), 0.5, 'outer minus inner is the annulus area');
+  void inner;
+}
+{
+  // an unfinished profile has to say so rather than quietly extrude wrong
+  const S = new Sketch();
+  const a = S.point(0, 0), b = S.point(20, 0), c = S.point(20, 15);
+  S.line(a, b); S.line(b, c);
+  const prof = S.profile();
+  ok(!prof.closed && prof.open === 1 && prof.loops.length === 0,
+     `two joined lines are an open chain, not a profile (open ${prof.open})`);
+}
+
+// ======================================================================
+console.log('\n--- and the whole way through to a solid ---');
+{
+  // sketch → profile → 2D field → extrude → mesh, using the SDF kernel's own
+  // mesher. This is the join between the two modules, so it is the one that
+  // proves they compose.
+  const k = { exports: {} };
+  new Function('module', readFileSync(join(HERE, 'sinterform.js'), 'utf8'))(k);
+  const SF = k.exports;
+
+  const R = 8, L = 38, H = 10;
+  const { S } = slot(R, L);
+  const f = S.sdf2d(0.001);
+  // an extrusion is exact: the 2D distance against the slab, whichever is
+  // nearer, and the corner handled by the usual min(max) form
+  const solid = (x, y, z) => {
+    const w = [f(x, y), Math.abs(z) - H / 2];
+    return Math.min(Math.max(w[0], w[1]), 0) + Math.hypot(Math.max(w[0], 0), Math.max(w[1], 0));
+  };
+
+  const res = 0.5, pad = 2 * res;
+  const lo = [-R - pad, -R - pad, -H / 2 - pad];
+  const hi = [L + R + pad, R + pad, H / 2 + pad];
+  const n = [0, 1, 2].map(i => Math.ceil((hi[i] - lo[i]) / res) + 1);
+  const vol = new Float32Array(n[0] * n[1] * n[2]);
+  let idx = 0;
+  for (let i = 0; i < n[0]; i++)
+    for (let j = 0; j < n[1]; j++)
+      for (let kk = 0; kk < n[2]; kk++)
+        vol[idx++] = solid(lo[0] + i * res, lo[1] + j * res, lo[2] + kk * res);
+  const mesh = SF.surfaceNets(vol, n[0], n[1], n[2], lo[0], lo[1], lo[2], res);
+  const nt = mesh.indices.length / 3;
+  ok(nt > 1000, `the extruded slot meshes: ${nt.toLocaleString()} triangles`);
+
+  // watertight?
+  const edges = new Map();
+  for (let t = 0; t < nt; t++) {
+    const A = mesh.indices[3 * t], B = mesh.indices[3 * t + 1], C = mesh.indices[3 * t + 2];
+    for (const [u, v] of [[A, B], [B, C], [C, A]]) {
+      const key = u < v ? `${u}_${v}` : `${v}_${u}`;
+      edges.set(key, (edges.get(key) || 0) + 1);
+    }
+  }
+  let bad = 0;
+  for (const v of edges.values()) if (v !== 2) bad++;
+  ok(bad === 0, `and is watertight${bad ? ` — ${bad} unpaired edges` : ''}`);
+
+  // volume by the divergence theorem, against area × height
+  const P = mesh.positions;
+  let V = 0;
+  for (let t = 0; t < nt; t++) {
+    const a = 3 * mesh.indices[3 * t], b = 3 * mesh.indices[3 * t + 1], c = 3 * mesh.indices[3 * t + 2];
+    V += (P[a] * (P[b + 1] * P[c + 2] - P[b + 2] * P[c + 1])
+        - P[a + 1] * (P[b] * P[c + 2] - P[b + 2] * P[c])
+        + P[a + 2] * (P[b] * P[c + 1] - P[b + 1] * P[c])) / 6;
+  }
+  const wantV = (L * 2 * R + Math.PI * R * R) * H;
+  ok(Math.abs(Math.abs(V) - wantV) / wantV < 0.01,
+     `volume ${Math.abs(V).toFixed(1)} mm³ vs area×height ${wantV.toFixed(1)} `
+     + `(${(100 * (Math.abs(V) - wantV) / wantV).toFixed(2)}%)`);
+
+  const stl = SF.meshToSTL(mesh, 'sinterform extruded sketch (mm)');
+  ok(stl && stl.size === 84 + nt * 50, `and writes an STL of ${stl.size.toLocaleString()} bytes`);
+}
+
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);
 process.exit(fail ? 1 : 0);

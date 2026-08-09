@@ -355,23 +355,38 @@ Sketch.prototype.normalAt = function (id, t) {
 Sketch.prototype.posOf = function (r) { return this._pos(this.x, r); };
 Sketch.prototype.dirOf = function (r) { return this._dir(this.x, r); };
 
+// The parameter at a curve's drawn end. A contact parameter is a variable the
+// solver moves; this is where the curve *stops being drawn*, which is a
+// different thing and is what a profile is built out of.
+Sketch.prototype._endParam = function (x, id, end) {
+  const e = this.ents[id];
+  if (e.k === KIND.LINE) return end ? 1 : 0;
+  if (e.k === KIND.ARC) return end ? x[e.vt1] : x[e.vt0];
+  if (e.k === KIND.NURBS) return end ? e.U[e.n + 1] : e.U[e.p];
+  throw new Error(`entity ${id} (${e.k}) has no ends`);
+};
+
 Sketch.prototype._pos = function (x, r) {
   if (r.p !== undefined) return this.ptOf(x, r.p);
   if (r.e !== undefined && r.t !== undefined)
     return this.evalAt(x, r.e, x[this.ents[r.t].v]).p;
+  if (r.e !== undefined && r.end !== undefined)
+    return this.evalAt(x, r.e, this._endParam(x, r.e, r.end)).p;
   if (r.e !== undefined && this.ents[r.e].k === KIND.POINT) return this.ptOf(x, r.e);
-  throw new Error('ref has no position — a curve needs a parameter: {e, t}');
+  throw new Error('ref has no position — a curve needs {t} or {end}');
 };
 
 Sketch.prototype._dir = function (x, r) {
   if (r.e !== undefined && r.t !== undefined)
     return this.evalAt(x, r.e, x[this.ents[r.t].v]).d;
+  if (r.e !== undefined && r.end !== undefined)
+    return this.evalAt(x, r.e, this._endParam(x, r.e, r.end)).d;
   if (r.e !== undefined && this.ents[r.e].k === KIND.LINE) {
     const e = this.ents[r.e];
     const a = this.ptOf(x, e.a), b = this.ptOf(x, e.b);
     return [b[0] - a[0], b[1] - a[1]];
   }
-  throw new Error('ref has no direction — a curve needs a parameter: {e, t}');
+  throw new Error('ref has no direction — a curve needs {t} or {end}');
 };
 
 // ======================================================================
@@ -938,10 +953,152 @@ Sketch.fromJSON = function (o) {
   return S;
 };
 
+// ======================================================================
+// profiles — turning a solved sketch into something you can extrude
+// ======================================================================
+// A sketch that solves is not yet a profile, and the difference is invisible
+// when you draw it. Four curves that are mutually tangent look exactly like a
+// closed slot on screen while being four disconnected pieces in memory: the
+// lines run past where they touch, the arcs are drawn over whatever extent
+// they were created with, and nothing says which end joins which.
+//
+// So closing a profile is a *modelling* act, not a rendering one. Constrain
+// the ends together -- `coincident` between two `{e, end}` refs -- and then
+// the loops fall out of which ends coincide.
+
+const CURVE_KINDS = [KIND.LINE, KIND.ARC, KIND.NURBS];
+
+// Walk the coincidence graph and return the closed loops, each as an ordered
+// list of { id, reversed }. Ends that touch within `tol` are the same node.
+Sketch.prototype.loops = function (tol) {
+  tol = tol || 1e-6;
+  const curves = this.ents.filter(e => !e.dead && CURVE_KINDS.indexOf(e.k) >= 0);
+  // cluster endpoints
+  const nodes = [];
+  const nodeOf = (p) => {
+    for (let i = 0; i < nodes.length; i++)
+      if (Math.hypot(nodes[i][0] - p[0], nodes[i][1] - p[1]) <= tol) return i;
+    nodes.push([p[0], p[1]]);
+    return nodes.length - 1;
+  };
+  const arcs = curves.map(e => {
+    const a = nodeOf(this._pos(this.x, { e: e.id, end: 0 }));
+    const b = nodeOf(this._pos(this.x, { e: e.id, end: 1 }));
+    return { id: e.id, a, b, used: false };
+  });
+  const at = nodes.map(() => []);
+  arcs.forEach((s, i) => { at[s.a].push(i); at[s.b].push(i); });
+
+  const loops = [], open = [];
+  for (const seed of arcs) {
+    if (seed.used) continue;
+    // a loop needs every node it passes through to have exactly two edges
+    const chain = [];
+    let cur = seed, from = seed.a, closed = false;
+    while (cur && !cur.used) {
+      cur.used = true;
+      const reversed = from !== cur.a;
+      chain.push({ id: cur.id, reversed });
+      const to = reversed ? cur.a : cur.b;
+      if (to === seed.a) { closed = true; break; }
+      const nextIdx = at[to].filter(i => !arcs[i].used);
+      if (at[to].length !== 2 || nextIdx.length !== 1) break;
+      from = to;
+      cur = arcs[nextIdx[0]];
+    }
+    (closed ? loops : open).push(chain);
+  }
+  // Orient: positive area is anticlockwise. Outer loops go anticlockwise,
+  // holes clockwise, which is the convention the 2D distance below expects.
+  // The coarse sampling here is only ever used for the *sign* -- a caller
+  // that wants the magnitude gets it from profile(), measured on the polygon
+  // it is actually handed.
+  const out = loops.map(chain => ({ entities: chain, sign: signedArea(this._loopPoints(chain, 0.05)) }));
+  out.sort((p, q) => Math.abs(q.sign) - Math.abs(p.sign));
+  return { loops: out, open };
+};
+
+function signedArea(poly) {
+  let A = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++)
+    A += poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1];
+  return A / 2;
+}
+
+Sketch.prototype._loopPoints = function (chain, tol) {
+  const pts = [];
+  for (const step of chain) {
+    let seg = this.sample(step.id, tol);
+    if (step.reversed) seg = seg.slice().reverse();
+    for (const p of seg) {
+      const last = pts[pts.length - 1];
+      if (last && Math.hypot(last[0] - p[0], last[1] - p[1]) < 1e-9) continue;
+      pts.push(p);
+    }
+  }
+  const a = pts[0], b = pts[pts.length - 1];
+  if (a && b && Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9) pts.pop();
+  return pts;
+};
+
+// Closed loops as polygons, biggest first. This is what feeds an extrude.
+Sketch.prototype.profile = function (tol) {
+  tol = tol === undefined ? 0.05 : tol;
+  const { loops, open } = this.loops();
+  return {
+    loops: loops.map(l => {
+      const points = this._loopPoints(l.entities, tol);
+      return { points, area: signedArea(points), entities: l.entities };
+    }),
+    open: open.length,     // chains that did not close: an unfinished profile
+    closed: open.length === 0 && loops.length > 0
+  };
+};
+
+// ======================================================================
+// 2D signed distance, so a profile can meet the rest of the kernel
+// ======================================================================
+// iq's polygon distance: nearest edge for the magnitude, a winding test for
+// the sign. Holes come from the loops beyond the first -- a point inside an
+// odd number of loops is solid. Exact, and 1-Lipschitz, which is what a
+// raymarcher needs from anything it is handed.
+function polygonSDF(loops, px, py) {
+  let d = Infinity, inside = false;
+  for (const poly of loops) {
+    const n = poly.length;
+    if (n < 3) continue;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const ex = poly[j][0] - poly[i][0], ey = poly[j][1] - poly[i][1];
+      const wx = px - poly[i][0], wy = py - poly[i][1];
+      let t = (wx * ex + wy * ey) / (ex * ex + ey * ey + 1e-300);
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const bx = wx - ex * t, by = wy - ey * t;
+      const dd = bx * bx + by * by;
+      if (dd < d) d = dd;
+      const c1 = py >= poly[i][1], c2 = py < poly[j][1];
+      if ((c1 && c2 && ex * wy > ey * wx) || (!c1 && !c2 && ex * wy < ey * wx))
+        inside = !inside;
+    }
+  }
+  return (inside ? -1 : 1) * Math.sqrt(d);
+}
+
+// A closure over the sampled profile: (x, y) -> signed distance in mm.
+// Sampled once, so moving the sketch afterwards does not change it.
+Sketch.prototype.sdf2d = function (tol) {
+  const prof = this.profile(tol);
+  const polys = prof.loops.map(l => l.points);
+  const f = (x, y) => polygonSDF(polys, x, y);
+  f.loops = polys;
+  f.closed = prof.closed;
+  f.open = prof.open;
+  return f;
+};
+
 const CONSTRAINT_KINDS = Object.keys(CONSTRAINTS);
 
 const SinterSketch = { Sketch, CONSTRAINTS, CONSTRAINT_KINDS, KIND,
-                       findSpan, dersBasisFuns, rankOf };
+                       polygonSDF, findSpan, dersBasisFuns, rankOf };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterSketch;
 root.SinterSketch = SinterSketch;
 })(typeof self !== 'undefined' ? self : globalThis);

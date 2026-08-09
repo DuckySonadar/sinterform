@@ -199,7 +199,7 @@ constraints, the solve report, reading and editing, serialisation, and the two
 characteristics worth knowing about before relying on it.
 
 ```
-node check-sketch.mjs      # 86 assertions
+node check-sketch.mjs      # 110 assertions
 ```
 
 ## Inlining it into HTML

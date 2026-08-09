@@ -255,6 +255,97 @@ being a guess rather than a bound.
 
 ---
 
+## Profiles — getting to something extrudable
+
+**A sketch that solves is not yet a profile, and the difference is invisible
+when you draw it.**
+
+Four curves constrained mutually tangent *look* exactly like a closed slot on
+screen while being four disconnected pieces in memory: the lines run past
+where they touch, the arcs are drawn over whatever extent they were created
+with, and nothing says which end joins which. Walk that as a loop and the gaps
+between consecutive pieces come out at 16 mm and 41 mm.
+
+So closing a profile is a modelling act, not a rendering one. Constrain the
+ends together and the loops fall out of which ends coincide.
+
+### Endpoint refs
+
+`{ e: id, end: 0 | 1 }` names a curve's **drawn** end — where it stops being
+drawn, as opposed to `{ e, t }`, which is a contact point the solver moves.
+
+| entity | `end: 0` | `end: 1` |
+| --- | --- | --- |
+| line | point `a` | point `b` |
+| arc | at `t0` | at `t1` |
+| nurbs | domain start | domain end |
+
+It is both a point source and a direction source, so it carries the tangent
+there too. That is what lets a profile be closed in two statements per joint:
+
+```js
+S.constrain('coincident', { e: arc, end: 1 }, { e: line, end: 0 });  // meet
+S.constrain('parallel',   { e: arc, end: 1 }, { e: line });          // smoothly
+```
+
+**Prefer this to `tangent` when building a profile.** `tangent` invents its
+own contact parameters and is free to place them anywhere on either curve;
+combined with endpoint coincidence the two fight, and the sketch will not
+converge. Tangency *at a shared end* is just parallel directions there — no
+extra unknowns, no branch ambiguity.
+
+### `loops([tol = 1e-6]) → { loops, open }`
+Walks the coincidence graph. Ends within `tol` are the same node; a loop
+requires every node it passes through to have exactly two edges. Returns
+closed chains of `{ id, reversed }`, biggest first, and the chains that did
+not close.
+
+### `profile([tol = 0.05]) → { loops, open, closed }`
+Loops sampled to polygons.
+
+```js
+{
+  loops: [ { points: [[x, y], …], area, entities } ],
+  open,     // chains that did not close — an unfinished profile
+  closed    // open === 0 and at least one loop
+}
+```
+
+`area` is signed and measured on the polygon actually returned: **positive is
+anticlockwise**. Loops come biggest first, so `loops[0]` is the outer boundary
+and the rest are holes. Area converges linearly in `tol`, which is what a
+chord approximation does — a slot reaches its analytic area to 0.03 mm² at
+`tol = 0.001`.
+
+A full circle closes as a loop on its own, since its two ends are the same
+point. Concentric circles are an annulus.
+
+### `sdf2d([tol]) → f(x, y)`
+Signed distance to the profile in mm: negative inside, zero on the boundary.
+Exact and 1-Lipschitz, which is what anything raymarching it will need.
+
+Holes come from the loops beyond the first — a point inside an odd number of
+loops is solid. Sampled once, so moving the sketch afterwards does not change
+the returned function. It carries `.loops`, `.closed` and `.open` for
+inspection.
+
+### Extruding
+
+`sketch.js` does not do 3D. The operator is five lines against
+`sinterform.js`, and it is exact:
+
+```js
+const f = S.sdf2d(0.001);
+const solid = (x, y, z) => {
+  const a = f(x, y), b = Math.abs(z) - height / 2;
+  return Math.min(Math.max(a, b), 0) + Math.hypot(Math.max(a, 0), Math.max(b, 0));
+};
+```
+
+Sample that into a grid, hand it to `SinterForm.surfaceNets`, and it meshes
+watertight. The test suite takes a slot the whole way and checks the mesh
+volume against area × height.
+
 ## Serialisation
 
 ### `toJSON() → object` · `Sketch.fromJSON(obj) → Sketch`
@@ -343,7 +434,7 @@ Thrown, not returned:
 node check-sketch.mjs
 ```
 
-86 assertions. Every constraint is verified independently after the solve —
+110 assertions. Every constraint is verified independently after the solve —
 measured from the geometry, not by asking the residual that was just
 minimised, because a residual can be small because the constraint is met or
 because it was written wrong and is small everywhere.
