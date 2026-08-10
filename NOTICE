@@ -17,3 +17,82 @@ This kernel was extracted from MetaMeld
 (https://github.com/DuckySonadar/mywebsiterepository-Iknowtotallyoriginal),
 which remains separately licensed. "MetaMeld" is a reserved trademark of that
 project and is not licensed with this software.
+
+
+================================================================================
+THIRD-PARTY SOFTWARE
+================================================================================
+
+This product includes software developed by third parties, listed below.
+Apache-2.0 section 4(d) is why they are listed here: these terms travel with
+the code, and a redistribution that drops this file drops the grant with it.
+
+
+--------------------------------------------------------------------------------
+Signed distance functions by Inigo Quilez — MIT License
+--------------------------------------------------------------------------------
+
+Several primitive distance functions in this repository are derived from the
+distance-function library published by Inigo Quilez at:
+
+    https://iquilezles.org/articles/distfunctions/
+
+That code is published under the MIT License, which permits commercial use
+provided the licence text is included and the source is credited. Both
+conditions are met here.
+
+Derived functions, and where each one lives:
+
+    capped cone       PRIMS.cone       sinterform.js  ·  GLSL.cone       glsl.js
+    ellipsoid bound   PRIMS.ellipsoid  sinterform.js  ·  GLSL.ellipsoid  glsl.js
+    pyramid           PRIMS.pyramid    sinterform.js  ·  GLSL.pyramid    glsl.js
+    octahedron        PRIMS.octa       sinterform.js  ·  GLSL.octa       glsl.js
+    polygon distance  polygonSDF       sinterform.js  ·  profileDecls    glsl.js
+                      polygonSDF       sketch.js
+                      polygonSDF       sketch3d.js
+
+Each is adapted rather than copied verbatim — rewritten in JavaScript,
+re-parameterised onto this kernel's dimension conventions, or both — but the
+method and its derivation are his, and the grant below is what makes that use
+lawful.
+
+The remaining primitives (sphere, box, cylinder, capsule, torus, prism, dome,
+arc, link, plane, field, profile) are either elementary distance formulae or
+were written for this repository.
+
+
+The MIT License
+
+Copyright (c) Inigo Quilez
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+A standing note on provenance
+================================================================================
+
+Shadertoy's default licence, applied to any shader whose author did not state
+otherwise, is CC BY-NC-SA 3.0. The NonCommercial term makes it unusable here
+and the ShareAlike term conflicts with Apache-2.0, so a function whose only
+provenance is an unlicensed Shadertoy paste cannot go into this repository.
+
+Take distance functions from a source that states its terms — the article above
+is the usual one — and add the function and its source to the list above in the
+same commit.
