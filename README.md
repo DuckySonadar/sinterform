@@ -460,7 +460,7 @@ material, so it caps too — retracing a path adds nothing.
 
 | `join` | at a corner | reaches |
 | --- | --- | --- |
-| `'round'` (default) | the profile revolved about the vertex | exactly the profile radius, at any angle |
+| `'round'` (default) | the section swept through the turn, about the axis the path turns about | exactly the profile radius, at any angle |
 | `'miter'` | both segments run on until their outer edges meet | `R / cos(turn/2)`, the true miter point |
 
 A miter runs on by `R·tan(turn/2)`, which is **zero on a straight joint** — so
@@ -474,8 +474,27 @@ first — caps both segments flat and leaves nothing filling the wedge between
 them. On a 120° corner with a 6 mm profile, material reached 0.05 mm past the
 vertex instead of 6.
 
+**A corner in space needs two more things right, and a round profile hides
+both.** The section is swept about the axis the path turns about, and in the
+plane that is always +Z — the section's own *v* — so nothing had to be worked
+out. Out of the plane the axis tilts, and sweeping about the wrong one puts a
+lobe of material at an angle the path never turned through while leaving the
+real wedge empty: the sweep pinches in where it should be fullest, and what
+fills it looks round because a circle sweeps into the same solid whichever way
+you spin it. The second thing is that the sweep must **stop at the turn** —
+going the whole way round is what the plane got away with, because the extra
+was inside the prisms, and out of the plane it hangs a blister off every joint
+of a sampled curve.
+
+The fill is a term of the union in its own right rather than something a
+segment answers for past its end, because out of the plane it reaches back
+*inside* both spans. `check-sweep.mjs` measures it against the same corner
+filleted and swept in 160 steps — no join code involved at all — and holds it
+to no material lost or invented, and no more than 0.05 mm reported past the
+truth on the outside.
+
 ```
-node check-sweep.mjs      # 78 assertions
+node check-sweep.mjs      # 105 assertions
 ```
 
 ## Inlining it into HTML

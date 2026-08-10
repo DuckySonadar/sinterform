@@ -570,6 +570,110 @@ const unit3 = (a) => { const l = v3.len(a); return [a[0] / l, a[1] / l, a[2] / l
   ok(bad === 0, 'every frame is orthonormal, right-handed and square to the tangent');
 }
 {
+  // A corner, checked against what a corner means.
+  //
+  // A round join is the section swept through the turn, so the honest way to
+  // check one is to turn the same corner in a few hundred tiny steps and let
+  // the union do it -- no join code involved at all. The two have to agree.
+  //
+  // In the plane they always did. In space the join has to revolve the section
+  // about the axis the path actually turns about, and a circular profile
+  // cannot tell you whether it does: a circle revolves into the same solid
+  // whichever way you spin it. It takes a section with a long way and a short
+  // way round to show it.
+  // The fillet has to be *tangent* to both legs, or it is not a rounded corner
+  // at all -- it is two more corners with an arc between them, and comparing
+  // against that measures nothing. Getting this wrong made the join look far
+  // worse than it was.
+  const corner = (dirB, rho, steps) => {
+    const L = 40, dA = [1, 0, 0], dB = unit3(dirB);
+    const A = [-L, 0, 0], B = dB.map(c => c * L);
+    if (!steps) return [A, [0, 0, 0], B];
+    const tau = Math.acos(Math.max(-1, Math.min(1, v3.dot(dA, dB))));
+    const P1 = dA.map(c => -c * rho * Math.tan(tau / 2));
+    const bis = unit3(v3.sub(dB, dA));                       // into the turn
+    const C = bis.map(c => c * rho / Math.cos(tau / 2));
+    const k = unit3(v3.cross(dA, dB)), r1 = v3.sub(P1, C);
+    const path = [A];
+    for (let i = 0; i <= steps; i++) {
+      const th = tau * i / steps, c = Math.cos(th), s = Math.sin(th);
+      const kr = v3.cross(k, r1), kd = v3.dot(k, r1) * (1 - c);
+      path.push([C[0] + r1[0] * c + kr[0] * s + k[0] * kd,
+                 C[1] + r1[1] * c + kr[1] * s + k[1] * kd,
+                 C[2] + r1[2] * c + kr[2] * s + k[2] * kd]);
+    }
+    path.push(B);
+    return path;
+  };
+  // its own stream, so that adding this did not move every sample every other
+  // block below draws
+  let cs = 0x1d3f0a7b;
+  const cspan = (h) => {
+    cs ^= cs << 13; cs ^= cs >>> 17; cs ^= cs << 5; cs |= 0;
+    return ((cs >>> 0) / 4294967296 * 2 - 1) * h;
+  };
+  const compare = (dirB, prof) => {
+    const sharp = SW.along(corner(dirB), prof);
+    const swept = SW.along(corner(dirB, 0.02, 160), prof);
+    let worst = 0, lost = 0, invented = 0, over = 0;
+    for (let i = 0; i < 40000; i++) {
+      const p = [cspan(22), cspan(22), cspan(22)];
+      const a = sharp(...p), b = swept(...p);
+      worst = Math.max(worst, Math.abs(a - b));
+      if (a > 0.05 && b < 0) lost++;
+      if (a < 0 && b > 0.05) invented++;
+      if (b > 0 && a > b + 1e-6) over = Math.max(over, a - b);
+    }
+    return { worst, lost, invented, over };
+  };
+  const turns = { 'in the XY plane': [0, 1, 0], 'up out of it': [0, 0, 1],
+                  'up and across': [0, 0.6, 0.8] };
+  for (const [name, dir] of Object.entries(turns)) {
+    const c = compare(dir, P.circle(5));
+    ok(c.worst < 0.05 && !c.lost && !c.invented,
+       `a circle round a corner ${name} matches the filleted path `
+       + `(worst ${c.worst.toFixed(3)} mm)`);
+  }
+  for (const [name, dir] of Object.entries(turns)) {
+    // The two directions are not the same thing. Losing or inventing material
+    // is the join being wrong about where the solid is. Reporting a shade less
+    // distance than the truth is the conservative direction and costs a
+    // marcher a step; reporting *more* is the one that lets it step through
+    // the surface, and that is held tight.
+    const r = compare(dir, P.rect(12, 5));
+    ok(!r.lost && !r.invented && r.worst < 0.3,
+       `and so does a 12×5 section, turning ${name} — no material lost or `
+       + `invented, worst gap ${r.worst.toFixed(3)} mm`);
+    ok(r.over < 0.05,
+       `  and outside it never reports more than ${r.over.toFixed(3)} mm past the truth`);
+  }
+  // How far material reaches along the corner's outward bisector, which is the
+  // same measurement the plane's corners are held to above -- now with the
+  // bisector pointing wherever the turn leaves it.
+  const R6 = 5;
+  const reachAlong = (f, dirB) => {
+    const b = unit3(v3.sub([1, 0, 0], dirB));
+    let d = 0;
+    for (let t = 0.01; t < R6 * 10; t += 0.01) {
+      if (f(b[0] * t, b[1] * t, b[2] * t) < 0) d = t; else break;
+    }
+    return d;
+  };
+  let notch = 0, off = 0;
+  for (const dir of Object.values(turns)) {
+    const turn = Math.acos(Math.min(1, v3.dot([1, 0, 0], unit3(dir))));
+    if (Math.abs(reachAlong(SW.along(corner(dir), P.circle(R6)), dir) - R6) > 0.02) notch++;
+    // a miter needs no axis -- it runs each segment on and caps it flat -- so
+    // it never had this to get wrong. Asserted rather than assumed.
+    const want = R6 / Math.cos(turn / 2);
+    if (Math.abs(reachAlong(SW.along(corner(dir), P.circle(R6), { join: 'miter' }), dir)
+                 - want) > 0.03) off++;
+  }
+  ok(notch === 0, 'a round join reaches exactly the profile radius whichever way the '
+     + 'corner turns, in the plane or out of it');
+  ok(off === 0, 'and a miter still runs on to R/cos(turn/2) along the bisector');
+}
+{
   // A closed path in space need not bring its frame back. That is the sphere's
   // doing, not the code's: the frame comes back turned by the area the tangent
   // traced out, so a mirror-symmetric loop traces half a sphere and comes back

@@ -345,10 +345,34 @@ function along(path, profile, opts) {
     const sHi = Math.max(sA, sB);
     const slope = L > 0 ? R * Math.abs(sB - sA) / L : 0;
     const roll = L > 0 ? R * sHi * Math.abs(dw) / L : 0;
+
+    // The turn at the far end: which axis the path turns about, and how far.
+    //
+    // In the plane there was nothing to work out -- every turn is about +Z,
+    // which is the section's own v axis. In space a path turns about whatever
+    // is perpendicular to both tangents, and a circular profile cannot tell
+    // you whether the join got it right, because a circle revolves into the
+    // same solid whichever way you spin it.
+    //
+    // The axis is held as its components in this segment's frame, which is
+    // exactly (cos, sin) of its angle there; the turn as its own cosine and
+    // sine, which the cross and the dot hand over for nothing. So the
+    // evaluator does all of this without a single trig call. In the XY plane
+    // the axis comes out (0, ±1) exactly, and the arithmetic reduces term for
+    // term to what this file did before.
+    const kk = cross3(T, tan[ni]);
+    const kl = len3(kk);
+    // straight, or doubling straight back: no turn to sweep the section
+    // through, and the neighbour covers that ground anyway
+    const kB = kl < 1e-9 ? [0, 1] : [dot3(kk, U) / kl, dot3(kk, V) / kl];
+
     seg.push({ ax: a[0], ay: a[1], az: a[2],
                tx: T[0], ty: T[1], tz: T[2],
                ux: U[0], uy: U[1], uz: U[2],
                vx: V[0], vy: V[1], vz: V[2],
+               k1u: kB[0], k1v: kB[1],
+               turnC: dot3(T, tan[ni]), turnS: kl,
+               round1: !capB, reach1: R * sB,
                L, sA, sB, capA, capB, e0, e1, dw,
                taper: Math.sqrt(1 + slope * slope + roll * roll) });
   }
@@ -364,21 +388,22 @@ function along(path, profile, opts) {
       // outside this segment's own span, and which end that is
       // a miter runs each segment on past its joint; a round join does not
       const oStart = -(proj + S.e0), oEnd = proj - (S.L + S.e1);
-      const out = oStart > oEnd ? oStart : oEnd;
-      const capThis = oStart > oEnd ? S.capA : S.capB;
+      const atA = oStart > oEnd;
+      const out = atA ? oStart : oEnd;
+      const capThis = atA ? S.capA : S.capB;
       const capped = Math.max(S.capA ? oStart : -1e30, S.capB ? oEnd : -1e30);
       const s = S.sA + (S.sB - S.sA) * t;
       // across the path and up it, in the frame this segment carries. For a
       // path in the XY plane that frame is (-ty, tx, 0) and +Z, so these are
       // the two lines this file had before, spelt in three coordinates.
-      let u = px * S.ux + py * S.uy + pz * S.uz;
-      let v = px * S.vx + py * S.vy + pz * S.vz;
+      const u0 = px * S.ux + py * S.uy + pz * S.uz;
+      const v0 = px * S.vx + py * S.vy + pz * S.vz;
       // whatever roll is left to do inside this segment, undone on the point
+      let u = u0, v = v0;
       if (S.dw) {
         const a = S.dw * t, ca = Math.cos(a), sa = Math.sin(a);
-        const u2 = u * ca + v * sa;
-        v = v * ca - u * sa;
-        u = u2;
+        u = u0 * ca + v0 * sa;
+        v = v0 * ca - u0 * sa;
       }
       // a 2D distance scaled by s: profile(q/s)*s is exact for uniform s
       const d2 = s > 1e-9 ? profile(u / s, v / s) * s : Math.hypot(u, v);
@@ -400,6 +425,19 @@ function along(path, profile, opts) {
       // rather than along the axis -- fills the wedge exactly, and for a
       // circular profile reproduces the capsule.
       //
+      // Radially *about the axis the path turns about*, which is the part that
+      // stops being obvious in space. A revolution leaves the coordinate along
+      // its axis alone and radialises the other two, so the section is swept
+      // through the corner in the plane the corner actually turns in. In the
+      // XY plane that axis is always +Z, which is the section's own v, so this
+      // reduces to radialising (u, out) and leaving v -- the two lines that
+      // were here before. Out of the plane it is some other direction in the
+      // section, and revolving about v instead sweeps the section through a
+      // plane the path never turns in: material bunched at the corner in a
+      // shape with no relation to the turn, and a wedge left unfilled beside
+      // it. A circular profile cannot show it, because a circle revolves into
+      // the same solid whichever way you spin it.
+      //
       // Rounding takes the nearer side rather than the side u happens to be
       // on. Choosing by sign(u) is discontinuous across the path centreline,
       // which costs nothing for a profile symmetric about it and jumps by
@@ -407,16 +445,77 @@ function along(path, profile, opts) {
       // lip, anything one-sided. For those the wedge gets filled on both
       // sides, which is a hair of extra material in a whisker-wide gap, and
       // continuous everywhere.
+      // Past the end, the answer is the distance to this segment's own material
+      // ending flat there, capped or not: out along the axis if the point is
+      // within the section, the hypotenuse if it is not. Both are exact, and
+      // neither depends on what happens at the joint -- the fill is its own
+      // term below. Capping only ever went wrong *inside* the span, where two
+      // abutting prisms would both read zero on their shared face; that is what
+      // `capped` guards, and it still excludes a rounded end.
       let raw;
-      if (out > 0) {
-        if (capThis) raw = d2 <= 0 ? out : Math.hypot(d2, out);
-        else {
-          const h = Math.hypot(u, out) / s;
-          raw = Math.min(profile(h, v / s), profile(-h, v / s)) * s;
-        }
-      } else raw = Math.max(d2, capped);
+      if (out > 0) raw = d2 <= 0 ? out : Math.hypot(d2, out);
+      else raw = Math.max(d2, capped);
       const d = raw / S.taper;
       if (d < best) best = d;
+
+      // The rounded joint at the far end: the section swept through the turn,
+      // as a term of its own rather than as something this segment answers for
+      // past its end.
+      //
+      // Both halves of that mattered. Gating it on being past the end is what
+      // the plane could get away with, because there the section revolves about
+      // its own v axis and the fill it adds inside the span is material the
+      // prism already has. Out of the plane the axis tilts, the sweep swings
+      // the section's *width* into v, and the fill reaches past the prism's
+      // face at stations well short of the joint -- ground that two prisms
+      // both call empty, so the material goes missing and the sweep pinches in
+      // where it should be fullest.
+      //
+      // And it has to stop at the turn. Revolving the whole way round is what
+      // the plane did, harmlessly, because the extra was inside the prisms;
+      // out of the plane it hangs a lobe of section-width material off every
+      // joint, which on a sampled curve is a row of blisters down the sweep.
+      // So the point's angle about the axis is clamped into the turn, which
+      // takes only the turn's cosine and sine -- and those are the dot and the
+      // cross that gave the axis in the first place.
+      //
+      // One term per joint, taken from the segment that ends there. The other
+      // side's section is this one turned about the same axis, so either sweeps
+      // out the same solid.
+      if (S.round1) {
+        const oJ = proj - S.L;                       // signed, either side of it
+        // It lives within a profile radius of the joint, so it can never report
+        // less than that far away -- less the taper, which divides the answer
+        // down and so has to be allowed for here too, or a term that would have
+        // won gets skipped and the field steps where it should be smooth.
+        if (Math.hypot(u0, v0, oJ) - S.reach1 < best * S.taper) {
+          let uj = u0, vj = v0;
+          if (S.dw) {                                // rolled to the joint, t = 1
+            const ca = Math.cos(S.dw), sa = Math.sin(S.dw);
+            uj = u0 * ca + v0 * sa;
+            vj = v0 * ca - u0 * sa;
+          }
+          const ku = S.k1u, kv = S.k1v, sJ = S.sB;
+          const pk = uj * ku + vj * kv;      // along the turn axis: untouched
+          const pm = vj * ku - uj * kv;      // across it, in the section plane
+          // where the point sits in the turn, clamped to it
+          let beta, off;
+          if (oJ < 0) { beta = pm; off = oJ; }                     // short of it
+          else if (pm * S.turnS - oJ * S.turnC >= 0) {             // within it
+            beta = Math.hypot(pm, oJ); off = 0;
+          } else {                                                 // past it
+            beta = pm * S.turnC + oJ * S.turnS;
+            off = oJ * S.turnC - pm * S.turnS;
+          }
+          const p2 = profile((pk * ku - beta * kv) / sJ,
+                             (pk * kv + beta * ku) / sJ) * sJ;
+          // inside the turn the section is a solid slice and carries its own
+          // depth; outside it the sweep has ended and the swept sheet is the
+          // nearest thing, at whatever the offset is
+          const c = (off === 0 ? p2 : Math.hypot(Math.max(p2, 0), Math.abs(off))) / S.taper;
+          if (c < best) best = c;
+        }
+      }
     }
     return best;
   };
