@@ -90,14 +90,14 @@
 const N = SinterView.node;
 
 // ----------------------------------------------------------------------
-// baking, so a sketch can reach the shader at all
+// baking, for the shapes that genuinely have no closed form
 // ----------------------------------------------------------------------
-// A sketch extrude is not a primitive and never will be -- it is an arbitrary
-// polygon, and the shader has no way to be handed one. The kernel already has
-// the answer to that, and it is the `field` primitive: sample the thing on a
-// grid, hand over the bytes, and both halves read the same numbers. So these
-// two scenes are also the only ones here that exercise a baked field, which
-// nothing else in the repository draws.
+// A sketch extrude used to be baked here, on the reasoning that the shader
+// cannot be handed a polygon. It can: `profile` compiles the outline into the
+// source, and the two sketch scenes below use it. What is left for the field
+// primitive is the case that really has no formula to emit -- a domain warp,
+// say -- so one scene keeps baking, because it is the only thing in the
+// repository that draws a field and the texture path is worth exercising.
 //
 // Samples sit on the grid corners, spanning the box exactly, because that is
 // where sampleField reads them from.
@@ -116,22 +116,13 @@ function bake(name, sdf, box, spacing, range) {
   return { name, nx: n[0], ny: n[1], nz: n[2], box, range, data, tex: null };
 }
 
-// The exact extrusion of a 2D profile: the profile's own distance against the
-// slab, whichever is nearer, with the corner handled by the usual min(max).
-function extrude2d(f, half) {
-  return (x, y, z) => {
-    const a = f(x, y), b = Math.abs(z) - half;
-    return Math.min(Math.max(a, b), 0) + Math.hypot(Math.max(a, 0), Math.max(b, 0));
-  };
-}
-
 // Scenes chosen for debugging rather than for looking nice. The first is the
 // one that earns its keep: every primitive at once, so a broken one is
 // obvious at a glance instead of being found by whichever model happened to
 // use it.
 const SCENES = {
   'every primitive': () => {
-    const keys = SinterForm.PRIM_KEYS.filter(k => k !== 'plane' && k !== 'field');
+    const keys = SinterForm.PRIM_KEYS.filter(k => k !== 'plane' && k !== 'field' && k !== 'profile');
     const cols = 5, pitch = 46;
     return [{ id: 0, nodes: keys.map((k, i) => N(k, {
       p: [(i % cols - (cols - 1) / 2) * pitch,
@@ -156,6 +147,24 @@ const SCENES = {
   'ellipsoid — the loose one': () => [{ id: 0, nodes: [
     N('ellipsoid', { p: [0, 0, 22], d: [64, 26, 34] })
   ] }],
+  // A box twisted about Z. There is no primitive for it and no polygon to
+  // hand over either, so it is sampled onto a grid -- the case the `field`
+  // primitive exists for, and the only field this page draws.
+  'twisted box — baked field': () => {
+    const box = [30, 30, 40], w = 0.03;
+    const f = (x, y, z) => {
+      const a = w * z, ca = Math.cos(a), sa = Math.sin(a);
+      const qx = Math.abs(x * ca + y * sa) - 18, qy = Math.abs(y * ca - x * sa) - 18;
+      const qz = Math.abs(z) - 32;
+      const d = Math.min(Math.max(qx, qy, qz), 0)
+              + Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) - 4;
+      return d / 1.4;                 // the twist steepens the gradient
+    };
+    SinterForm.fields = [bake('twisted box', f, box, 0.6, 16)];
+    return [{ id: 0, nodes: [
+      N('field', { p: [0, 0, 44], d: box.slice(), fi: 0 })
+    ] }];
+  },
   // A constrained 2D sketch, closed into a profile and extruded. Drawn rough
   // and solved here exactly as it would be anywhere else, so what is on screen
   // is the solver's answer rather than a shape typed in to look like one.
@@ -185,13 +194,13 @@ const SCENES = {
     S.constrain('concentric', bore, arcR);
     S.solve();
 
-    const prof = S.sdf2d(0.05);
-    const box = [L / 2 + R + 3, R + 3, H / 2 + 3];
-    // centred on the profile, then lifted so it stands on the plate
-    const f = extrude2d((x, y) => prof(x + L / 2, y), H / 2);
-    SinterForm.fields = [bake('sketch 2D', f, box, 0.55, 14)];
+    // The loops, centred, handed over as loops. No grid, no bytes: the shader
+    // walks the same edges the JS twin does.
+    const loops = S.profile(0.05).loops.map(l => l.points.map(q => [q[0] - L / 2, q[1]]));
+    SinterForm.profiles = [{ name: 'sketch 2D', loops }];
+    const e = SinterForm.profileExtent(loops);
     return [{ id: 0, nodes: [
-      N('field', { p: [-L / 2, 0, H / 2 + 4], d: box.slice(), fi: 0 })
+      N('profile', { p: [0, 0, H / 2 + 4], d: [e[0], e[1], H / 2], fi: 0 })
     ] }];
   },
 
@@ -218,15 +227,28 @@ const SCENES = {
     S.constrain('parallel', { e: bore, t: S.param(Math.PI / 2, { fixed: true }) }, { e: e[0] });
     S.solve();
 
+    // A face already knows its own plane, and profile() hands its loops back in
+    // that plane's coordinates -- so the extrusion is the same primitive with
+    // the node turned to match, and nothing has to be baked to get it there.
+    // The angles are the plane's own frame read back as Rz.Ry.Rx, which is the
+    // rotation the kernel applies.
     const face = S.profile(0.05).faces[0];
-    const solid = S.extrude(face, T);
-    const b = solid.bounds;
-    const mid = [0, 1, 2].map(i => (b.lo[i] + b.hi[i]) / 2);
-    const box = [0, 1, 2].map(i => (b.hi[i] - b.lo[i]) / 2 + 3);
-    SinterForm.fields = [bake('sketch 3D',
-      (x, y, z) => solid(x + mid[0], y + mid[1], z + mid[2]), box, 0.6, 16)];
+    const outer = face.loops[0].uv;
+    const ctr = outer.reduce((a, q) => [a[0] + q[0], a[1] + q[1]], [0, 0])
+                     .map(z => z / outer.length);
+    const loops = face.loops.map(l => l.uv.map(q => [q[0] - ctr[0], q[1] - ctr[1]]));
+    SinterForm.profiles = [{ name: 'sketch 3D', loops }];
+    const ext = SinterForm.profileExtent(loops);
+    const fu = face.u, fv = face.v, fn = face.normal, deg = 180 / Math.PI;
+    const ang = [Math.atan2(fv[2], fn[2]) * deg,
+                 Math.asin(-Math.min(1, Math.max(-1, fu[2]))) * deg,
+                 Math.atan2(fu[1], fu[0]) * deg];
+    // the face's own centre in world, lifted clear of the plate
+    const mid = [0, 1, 2].map(i => face.origin[i] + fu[i] * ctr[0] + fv[i] * ctr[1]);
+    const lift = ext[0] + ext[1] + T;
     return [{ id: 0, nodes: [
-      N('field', { p: [mid[0], mid[1], mid[2] - b.lo[2] + 4], d: box.slice(), fi: 0 })
+      N('profile', { p: [mid[0], mid[1], mid[2] + lift], r: ang,
+                     d: [ext[0], ext[1], T / 2], fi: 0 })
     ] }];
   },
 

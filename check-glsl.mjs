@@ -94,6 +94,30 @@ const cases = KEYS.map(k => {
   return { key: k, fn: GL.GLSL[k].fn, glsl: GL.GLSL[k].src, name: P.name, d, r, pts };
 });
 
+// `profile` is baked, so the loop above skipped it -- but unlike `field` it is
+// baked into *source*, not into a texture, so its twin is checkable here and
+// nowhere else. The GLSL side is whatever `profileDecls` writes for this
+// outline; the JS side reads the same outline out of `SF.profiles`. If the
+// unrolled edge macro ever disagrees with `polygonSDF` -- a winding rule, a
+// clamp, the crossing test -- this is where it shows.
+{
+  const loops = [
+    [[-20, -8], [-8, -8], [-8, -20], [8, -20], [8, -8], [20, -8],
+     [20, 8], [8, 8], [8, 20], [-8, 20], [-8, 8], [-20, 8]],
+    [[-5, -5], [5, -5], [5, 5], [-5, 5]]
+  ];
+  SF.profiles = [{ name: 'test cross', loops }];
+  const d = [...SF.profileExtent(loops), 6];
+  const pts = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.7;
+    pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.7;
+    pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 4.0;
+  }
+  cases.push({ key: 'profile', fn: 'pProfile0', glsl: GL.profileDecls(SF.profiles),
+               name: SF.PRIMS.profile.name, d, r: 0, slotted: true, pts });
+}
+
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || undefined,
   args: ['--enable-unsafe-swiftshader', '--use-gl=angle', '--use-angle=swiftshader']
@@ -123,7 +147,7 @@ uniform float uR;
 ${c.glsl}
 void main(){
   vec3 p = texelFetch(uPts, ivec2(gl_FragCoord.xy), 0).xyz;
-  outc = vec4(${c.fn}(p, uD, uR), 0.0, 0.0, 1.0);
+  outc = vec4(${c.slotted ? `${c.fn}(p, uD)` : `${c.fn}(p, uD, uR)`}, 0.0, 0.0, 1.0);
 }`;
     const mk = (t, src) => {
       const s = gl.createShader(t);

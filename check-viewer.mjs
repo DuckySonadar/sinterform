@@ -52,10 +52,12 @@ const ok = (cond, msg) => {
 // the silhouette is not sensitive to it at this size.
 const SCENES = ['every primitive', 'booleans', 'two bodies, no blend across',
                 'ice cream',
-                // The two that arrive as a baked field rather than as
-                // primitives, which is the only way a sketch can reach the
-                // shader at all -- and the only scenes here that exercise the
-                // field primitive on either side.
+                // The only scene that arrives as a baked field, so this is
+                // where the 3D texture path is held against sampleField.
+                'twisted box — baked field',
+                // Sketches reach the shader as compiled-in outlines, so these
+                // two are where profileDecls is held against polygonSDF with
+                // a real solved profile rather than a test polygon.
                 'sketch 2D, extruded', 'sketch 3D, extruded'];
 const RES = 0.9;
 

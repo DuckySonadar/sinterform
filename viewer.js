@@ -158,7 +158,9 @@ function mapBody(plan) {
 
 function fragSource(plan) {
   const { body, at } = mapBody(plan);
-  return { src: PREAMBLE + `${GL.library()}\nfloat map(vec3 P){\n`
+  // A profile's outline is compiled into the shader rather than uploaded, so
+  // the source depends on the document's profiles as well as on the plan.
+  return { src: PREAMBLE + `${GL.library()}\n${GL.profileDecls(SF.profiles)}\nfloat map(vec3 P){\n`
     + `  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n` + TAIL, at };
 }
 

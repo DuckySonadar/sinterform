@@ -48,6 +48,62 @@
 // spacing, so the quantisation is never the limit.
 let fields = [];         // [{ name, nx, ny, nz, box:[hx,hy,hz], range, data, tex }]
 
+// Profiles, the same idea for a shape that is a *drawing* rather than a
+// sampled volume. A closed 2D outline extruded to a thickness is most of what
+// anyone sketches, and it does not have to be baked to reach a shader: the
+// distance to a polygon is a loop over its edges, which GLSL can run as
+// happily as JS can. Baking one would cost a megabyte of texture and a grid's
+// worth of resolution to say what a few hundred vec2s say exactly.
+//
+// Like `fields`, they live on the document rather than inside a node, and a
+// node of type `profile` refers to one by index.
+let profiles = [];       // [{ name, loops: [[[x, y], ...], ...] }]
+
+// iq's polygon distance: nearest edge for the magnitude, a crossing count for
+// the sign. Loops beyond the first are holes -- a point inside an odd number
+// of them is outside the material. Exact, and 1-Lipschitz.
+//
+// This is the same function sketch.js exports, and deliberately a second copy:
+// the two files do not depend on each other, and check-glsl.mjs holds this one
+// against its GLSL twin while check-sketch.mjs holds that one against the
+// geometry. A third copy would be one too many; two is the cost of the seam.
+function polygonSDF(loops, px, py) {
+  let d = Infinity, inside = false;
+  for (const poly of loops) {
+    const n = poly.length;
+    if (n < 3) continue;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const ex = poly[j][0] - poly[i][0], ey = poly[j][1] - poly[i][1];
+      const wx = px - poly[i][0], wy = py - poly[i][1];
+      let t = (wx * ex + wy * ey) / (ex * ex + ey * ey + 1e-300);
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const bx = wx - ex * t, by = wy - ey * t;
+      const dd = bx * bx + by * by;
+      if (dd < d) d = dd;
+      const c1 = py >= poly[i][1], c2 = py < poly[j][1];
+      if ((c1 && c2 && ex * wy > ey * wx) || (!c1 && !c2 && ex * wy < ey * wx))
+        inside = !inside;
+    }
+  }
+  return d === Infinity ? 1e9 : (inside ? -1 : 1) * Math.sqrt(d);
+}
+
+// The half-extent of a profile in its own plane. A node carries this in its
+// dims because `ext` -- which is what bounds are computed from -- is handed
+// the dims and nothing else, the same way a field carries its box.
+function profileExtent(loops) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const poly of loops)
+    for (const p of poly) {
+      if (p[0] < x0) x0 = p[0];
+      if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1];
+      if (p[1] > y1) y1 = p[1];
+    }
+  return x1 < x0 ? [0, 0] : [Math.max(Math.abs(x0), Math.abs(x1)),
+                             Math.max(Math.abs(y0), Math.abs(y1))];
+}
+
 function decodeField(f) {
   if (!f || !f.data) return null;
   const bin = atob(f.data);
@@ -354,6 +410,31 @@ const PRIMS = {
       return Math.max(sampleField(f, p[0], p[1], p[2]), box);
     },
     ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
+  },
+
+  // A closed 2D outline given a thickness -- the shape a sketch turns into.
+  // The outline is not in the node: it is in `profiles`, and `fi` says which,
+  // exactly as a baked field works. What the node carries is the half-extent
+  // of the outline and half the thickness, because that is what bounds are
+  // computed from.
+  //
+  // No rounding: the outline already says what its corners do. Rotating the
+  // node is what puts the extrusion somewhere other than up the Z axis, which
+  // is how a face found in a tilted plane arrives here.
+  profile: {
+    name: 'Profile', round: false, baked: true,
+    dims: [['Half width', 0.5, 200, 0.5], ['Half depth', 0.5, 200, 0.5],
+           ['Half height', 0.25, 100, 0.25]],
+    def: [20, 20, 6],
+    js: (p, d, r, n) => {
+      const pr = profiles[(n && n.fi) || 0];
+      if (!pr || !pr.loops) return 1e9;
+      const a = polygonSDF(pr.loops, p[0], p[1]);
+      const b = Math.abs(p[2]) - d[2];
+      return Math.min(Math.max(a, b), 0)
+           + Math.hypot(Math.max(a, 0), Math.max(b, 0));
+    },
+    ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
   }
 };
 const PRIM_KEYS = Object.keys(PRIMS);
@@ -575,7 +656,10 @@ const SinterForm = {
   PRIMS, PRIM_KEYS, OPS, RAD, dimIsLength, dimUnit,
   get fields() { return fields; },
   set fields(v) { fields = v; },
+  get profiles() { return profiles; },
+  set profiles(v) { profiles = v; },
   decodeField, encodeField, sampleField,
+  polygonSDF, profileExtent,
   smin, smax, invRot,
   sceneSDF, sceneBounds, surfaceNets, meshToSTL
 };

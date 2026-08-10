@@ -175,7 +175,15 @@ const GLSL = {
   vec3 uvw = (p + d)/(2.0*d);
   float v = (texture(s, clamp(uvw.zyx, 0.0, 1.0)).r*2.0 - 1.0)*r;
   return max(v, box);
-}` }
+}` },
+
+  // A profile is the other one whose data cannot travel in the uniform block,
+  // and it does not need to: an outline is a few hundred vec2s, and the
+  // distance to a polygon is a loop over its edges. So it arrives as generated
+  // source rather than as a texture -- `profileDecls` writes one function per
+  // profile, and `call` names the slot in the function rather than passing it.
+  // The src here is empty for that reason; there is nothing shared to emit.
+  profile: { fn: 'pProfile', slotted: true, src: '' }
 };
 
 // The whole primitive function library, ready to paste into a fragment
@@ -192,6 +200,9 @@ function library(keys) {
 function call(key, point, dims, round, field) {
   const g = GLSL[key];
   if (!g) throw new Error('no GLSL for primitive: ' + key);
+  // A slotted primitive's data is compiled into a function of its own, so the
+  // slot is part of the name and there is no round to pass.
+  if (g.slotted) return `${g.fn}${field | 0}(${point}, ${dims})`;
   return g.sampler
     ? `${g.fn}(uField${field | 0}, ${point}, ${dims}, ${round})`
     : `${g.fn}(${point}, ${dims}, ${round})`;
@@ -200,13 +211,62 @@ function call(key, point, dims, round, field) {
 // The sampler declarations the library needs. `count` is the caller's texture
 // budget: this file has no opinion about how many are affordable.
 // GLSL ES 3.0 has no default precision for sampler3D, so it is stated here.
+// One function per profile, with its outline compiled straight into it.
+//
+// This is iq's polygon distance, the same loop sinterform.js runs in JS, then
+// the usual slab combine for the extrusion -- so the two halves are the same
+// arithmetic on the same numbers, and check-glsl.mjs holds them to it. Loops
+// after the first are holes: the crossing count runs over all of them at once,
+// so a point inside an odd number is outside the material.
+//
+// The edges are emitted one after another rather than indexed out of a const
+// array in a loop. Dynamic indexing of a constant array is where a GLSL
+// compiler is entitled to give up and expand every read into a chain of
+// selects, one per entry, which turns an O(edges) function into O(edges^2) --
+// on a software rasteriser that was the difference between a frame and forty
+// seconds. Straight-line code also lets the compiler fold each edge's vector
+// arithmetic at compile time, since both its ends are literals.
+function profileDecls(profiles) {
+  let s = '';
+  (profiles || []).forEach((pr, i) => {
+    const loops = ((pr && pr.loops) || []).filter(l => l && l.length >= 3);
+    if (!loops.length) { s += profileStub(i); return; }
+    const f = (v) => (Number.isFinite(v) ? v : 0).toPrecision(8);
+    let body = '';
+    for (const poly of loops)
+      for (let a = 0, b = poly.length - 1; a < poly.length; b = a++)
+        body += `  E(vec2(${f(poly[a][0])},${f(poly[a][1])}),`
+              + `vec2(${f(poly[b][0])},${f(poly[b][1])}));\n`;
+    s += `float pProfile${i}(vec3 p, vec3 d){
+  float dd = 1e18; bool ins = false;
+#define E(A, B) { vec2 e = (B) - (A), w = p.xy - (A); \\
+  vec2 q = w - e*clamp(dot(w, e)/dot(e, e), 0.0, 1.0); \\
+  dd = min(dd, dot(q, q)); \\
+  bool c1 = p.y >= (A).y, c2 = p.y < (B).y; \\
+  float cr = e.x*w.y - e.y*w.x; \\
+  if ((c1 && c2 && cr > 0.0) || (!c1 && !c2 && cr < 0.0)) ins = !ins; }
+${body}#undef E
+  float da = (ins ? -1.0 : 1.0)*sqrt(dd);
+  float db = abs(p.z) - d.z;
+  return min(max(da, db), 0.0) + length(max(vec2(da, db), 0.0));
+}
+`;
+  });
+  return s;
+}
+// A slot with no outline in it still has to compile: the shader is generated
+// from the plan, and a node can name a profile that is not there yet.
+function profileStub(i) {
+  return `float pProfile${i}(vec3 p, vec3 d){ return 1e9; }\n`;
+}
+
 function samplerDecls(count) {
   let s = 'precision highp sampler3D;\n';
   for (let i = 0; i < (count | 0); i++) s += `uniform sampler3D uField${i};\n`;
   return s;
 }
 
-const SinterFormGLSL = { GLSL, library, call, samplerDecls,
+const SinterFormGLSL = { GLSL, library, call, samplerDecls, profileDecls,
                          KEYS: Object.keys(GLSL) };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterFormGLSL;
 root.SinterFormGLSL = SinterFormGLSL;

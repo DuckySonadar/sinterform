@@ -58,8 +58,8 @@ the other order. Those change the outline, and the outline is what this shows.
 
 The first scene, and the one it opens on, is *every primitive* — all of them
 at once, so a broken one is obvious at a glance instead of being found later by
-whichever model happened to use it. (`plane` and `field` sit it out: one is a
-half-space that would swallow the grid, the other needs data.)
+whichever model happened to use it. (`plane`, `field` and `profile` sit it out:
+one is a half-space that would swallow the grid, the other two need data.)
 
 Two of the scenes are sketches: **sketch 2D, extruded** is a `sketch.js`
 profile closed by constraints and given a thickness, and **sketch 3D,
@@ -67,11 +67,11 @@ extruded** is a `sketch3d.js` plate found by `profile()` and extruded along its
 own plane's normal. Both are solved when the scene loads, so what is on screen
 is the solver's answer rather than a shape typed in to look like one.
 
-A sketch extrude is not a primitive and never will be — it is an arbitrary
-polygon, and the shader has no way to be handed one. It reaches the GPU the
-only way anything non-primitive can: **baked into a `field`**, sampled on a
-grid, which is what that primitive is for. So those two scenes are also the
-only ones that exercise a baked field, on either side.
+Neither is baked. A sketch extrude reaches the GPU as a `profile` — the
+outline compiled straight into the shader source, so both halves walk the same
+edges. What still needs baking is the shape with no formula at all: **twisted
+box — baked field** is a domain warp sampled onto a grid, and it is the only
+scene here that exercises a `field` on either side.
 
 ## Conventions
 
@@ -113,7 +113,7 @@ these are the fields the kernel reads:
 | `on` | `false` hides it from bounds; callers usually filter these out first |
 | `b` | which body it belongs to |
 | `mx`, `my`, `mz` | mirror across that axis (evaluates at `abs` of the coordinate) |
-| `fi` | which baked field, for `t: 'field'` |
+| `fi` | which baked field, for `t: 'field'` — or which outline, for `t: 'profile'` |
 
 Shapes fold in order: each one is combined with the running distance so far,
 so a `cut` removes what is already there and the order of the list matters.
@@ -200,11 +200,14 @@ const GL = require('./glsl.js');
 GL.library(PRIM_KEYS)                       // the whole primitive function set
 GL.call('box', 'q', 'uD[5].xyz', 'uD[4].w') // → "pBox(q, uD[5].xyz, uD[4].w)"
 GL.samplerDecls(4)                          // sampler3D declarations, 4 of them
+GL.profileDecls(SinterForm.profiles)        // one pProfileN function per outline
 ```
 
 `GL.call` knows the sampler-first calling convention baked primitives use, so
-a consumer does not have to. The uniform *expressions* are the caller's, which
-is what keeps the packing out of here.
+a consumer does not have to. It also knows the *slotted* convention `profile`
+uses — the slot is part of the function name, because the outline is compiled
+into the function rather than passed to it. The uniform *expressions* are the
+caller's, which is what keeps the packing out of here.
 
 One thing a consumer does have to know: **a baked field takes its `range`
 through the slot every other primitive uses for corner rounding.** A field has
@@ -256,6 +259,37 @@ whole array when it loads or imports a document. Assign to
 that local to be seen. A copied reference leaves the two sides looking at
 different arrays, and the symptom — a baked shape rendering as the one you
 opened before — is slow to trace back here.
+
+### Profiles
+
+A closed outline extruded along Z. This is what a sketch becomes, and it is
+deliberately *not* a baked field: the polygon is exact, and a grid fine enough
+to hold a 0.1 mm fillet costs a megabyte to say what a few hundred `vec2`s say
+exactly.
+
+```js
+SinterForm.profiles = [{ name, loops: [[[x, y], ...], ...] }];
+polygonSDF(loops, x, y) · profileExtent(loops)
+```
+
+Loop 0 is the outer boundary and the rest are holes — containment is even-odd,
+so winding does not matter. `polygonSDF` is iq's: nearest edge for the
+magnitude, a crossing count for the sign. Exact and 1-Lipschitz, at a cost
+linear in the edge count, per sample. `profileExtent` gives the half-extents a
+node's `d[0]`/`d[1]` want; `d[2]` is the half-thickness, and it is the only
+one of the three the shape actually reads.
+
+`profiles` is a getter/setter pair with the same rule as `fields`: assign to
+`SinterForm.profiles`, never write through a captured local.
+
+On the GPU the outline is not a uniform and not a texture — `GL.profileDecls`
+writes one function per profile with the edges **unrolled into the source**.
+That is not cosmetic. Reading a dynamically indexed `const vec2[]` array in
+GLSL expands to a select chain per read, so a few hundred edges compile in
+tens of seconds and unrolled ones in a few. A slot with no outline still emits
+a function that returns `1e9`, because the shader is generated from the plan
+and a node can name a profile that has not arrived yet — so changing an
+outline means recompiling, while moving the node does not.
 
 ## Sketches (`sketch.js`)
 

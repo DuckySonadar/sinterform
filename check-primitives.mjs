@@ -47,6 +47,19 @@ const rnd = () => {
 const span = (h) => (rnd() * 2 - 1) * h;
 
 const SKIP = new Set(['plane', 'field']);   // infinite; needs a baked grid
+
+// `profile` reads its outline from the document rather than from its dims, so
+// it needs one side-loaded before the loop reaches it. A cross with a square
+// hole is the useful shape here: reentrant corners exercise the sign test and
+// the medial axis, and the hole exercises the even-odd rule. Its extent is
+// exactly the primitive's default dims, so `ext` is tight rather than
+// generous -- a short box would show up in the bounds check.
+SF.profiles = [{ name: 'test cross', loops: [
+  [[-20, -8], [-8, -8], [-8, -20], [8, -20], [8, -8], [20, -8],
+   [20, 8], [8, 8], [8, 20], [-8, 20], [-8, 8], [-20, 8]],
+  [[-5, -5], [5, -5], [5, 5], [-5, 5]]
+] }];
+
 let worstEver = 0, worstWho = '';
 
 for (const key of SF.PRIM_KEYS) {
