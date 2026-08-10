@@ -160,7 +160,7 @@ function fragSource(plan) {
   const { body, at } = mapBody(plan);
   // A profile's outline is compiled into the shader rather than uploaded, so
   // the source depends on the document's profiles as well as on the plan.
-  return { src: PREAMBLE + `${GL.library()}\n${GL.profileDecls(SF.profiles)}\nfloat map(vec3 P){\n`
+  return { src: PREAMBLE + `${GL.library()}\n${GL.profileDecls(SF.profiles, maxProfileSlot(view.plan))}\nfloat map(vec3 P){\n`
     + `  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n` + TAIL, at };
 }
 
@@ -286,15 +286,11 @@ void main(){
       uData[b + 4] = (n.r[0] || 0) * SF.RAD;
       uData[b + 5] = (n.r[1] || 0) * SF.RAD;
       uData[b + 6] = (n.r[2] || 0) * SF.RAD;
-      // A baked field has no rounding, and its GLSL twin takes the *range* --
-      // the millimetres one byte of sample spans -- through that slot instead.
-      // The JS twin reads it off the field object, so nothing in the plan
-      // carries it and a consumer that packs `round` here gets a field that
-      // reads zero everywhere: max(0, box), which draws as the bounding box
-      // and looks like the texture never arrived.
-      uData[b + 7] = n.t === 'field'
-        ? (((SF.fields || [])[n.fi | 0] || { range: 0 }).range || 0)
-        : (n.round || 0);
+      // Corner rounding for every primitive but the baked field, which has no
+      // rounding and takes its *range* through this slot instead. The kernel
+      // owns that rule -- `sceneSDF` asks the same function -- so the two
+      // halves cannot disagree about what is in this uniform.
+      uData[b + 7] = SF.roundSlot(n);
       uData[b + 8] = n.d[0]; uData[b + 9] = n.d[1] || 0; uData[b + 10] = n.d[2] || 0;
     }
   }
@@ -437,6 +433,17 @@ void main(){
 
 // A node with every field the kernel reads, so callers can write only what
 // they mean. Handy enough that the viewer would otherwise grow its own.
+// How many profile slots the shader must be able to name. A node may refer to
+// a slot the library has not filled in yet, and an undeclared pProfileN is a
+// compile error rather than an empty shape.
+function maxProfileSlot(plan) {
+  let n = 1;
+  for (const body of plan || [])
+    for (const q of body.nodes || [])
+      if (q.t === 'profile') n = Math.max(n, (q.fi | 0) + 1);
+  return n;
+}
+
 function node(t, over) {
   return Object.assign({ t, on: true, op: 'add', k: 0, b: 0, tg: null, fi: 0,
     p: [0, 0, 0], r: [0, 0, 0], d: (SF.PRIMS[t] || { def: [0, 0, 0] }).def.slice(),

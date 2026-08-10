@@ -122,7 +122,7 @@ function bake(name, sdf, box, spacing, range) {
 // use it.
 const SCENES = {
   'every primitive': () => {
-    const keys = SinterForm.PRIM_KEYS.filter(k => k !== 'plane' && k !== 'field' && k !== 'profile');
+    const keys = SinterForm.PRIM_KEYS.filter(k => k !== 'plane' && k !== 'field');
     const cols = 5, pitch = 46;
     return [{ id: 0, nodes: keys.map((k, i) => N(k, {
       p: [(i % cols - (cols - 1) / 2) * pitch,

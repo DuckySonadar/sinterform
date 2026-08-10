@@ -61,8 +61,10 @@ the other order. Those change the outline, and the outline is what this shows.
 
 The first scene, and the one it opens on, is *every primitive* — all of them
 at once, so a broken one is obvious at a glance instead of being found later by
-whichever model happened to use it. (`plane`, `field` and `profile` sit it out:
-one is a half-space that would swallow the grid, the other two need data.)
+whichever model happened to use it. `profile` is in it too, drawing its default
+20 × 20 mm square — a primitive that shows nothing until an application feeds it
+is a primitive nobody can see to fix. (`plane` and `field` sit it out: one is a
+half-space that would swallow the grid, the other needs real samples.)
 
 Two of the scenes are sketches: **sketch 2D, extruded** is a `sketch.js`
 profile closed by constraints and given a thickness, and **sketch 3D,
@@ -214,13 +216,26 @@ caller's, which is what keeps the packing out of here.
 
 One thing a consumer does have to know: **a baked field takes its `range`
 through the slot every other primitive uses for corner rounding.** A field has
-no rounding, the range has to arrive somehow, and the JS twin reads it off the
-field object instead — so nothing in a plan carries it. Pack `round` there by
-mistake and every sample comes back multiplied by zero, which draws as the
-field's bounding box and looks exactly like a texture that never arrived.
-Uploading the texture is the consumer's job too; `viewer.js` does it in about
-twenty lines, and its `texOf` is the reference for the layout — `nz` wide by
-`ny` by `nx`, trilinear, edges clamped, to match `sampleField`.
+no rounding and the range has to arrive somehow. Do not reimplement that rule —
+ask for it:
+
+```js
+uData[b + 7] = SinterForm.roundSlot(node);   // rounding, or a field's range
+```
+
+`sceneSDF` asks the same function, so the two halves cannot disagree about
+what is in that uniform. Packing `round` there by hand gives a field multiplied
+by zero, which draws as its bounding box and looks exactly like a texture that
+never arrived.
+
+Uploading the texture is the consumer's job; `viewer.js` does it in about twenty
+lines and its `texOf` is the reference for the layout — `nz` wide by `ny` by
+`nx`, trilinear, edges clamped. **Samples sit on the grid corners, spanning the
+box exactly**, which is what every baker here writes; a texture's own
+coordinates put sample `i` at texel centre `(i + 0.5)/n`, so `fieldSample`
+corrects the mapping. Without that correction the shader reads the field
+stretched by half a texel at each end — 1.2 mm on a coarse grid, and invisible
+until the twins are compared per point.
 
 **No budgets live in this repository.** How many shapes fit in the uniforms
 and how many fields fit in texture units belong to whoever packs them — a
@@ -263,13 +278,34 @@ authors agreed, and `check-kernel.mjs` refuses a stale generated block so a
 hand-edited twin cannot creep back.
 
 The generator parses the subset of GLSL ES 3.0 the primitives actually use —
-`float`/`vec2`/`vec3`, no loops, twelve builtins, 114 lines across all of them.
-Anything outside that subset is a **parse error rather than a silent
-mistranslation**, which is the property that matters. Two primitives are
-hand-written and excluded, both recorded in the generated block's header:
-`field` reads a `sampler3D` and its JS side interpolates `fields` in JavaScript
-(a binding, not a translation), and `profile` is generated source with a
-preprocessor macro whose JS side is `polygonSDF`, shared with the sketchers.
+`float`/`vec2`/`vec3`/`int`/`bool`, one loop form, a dozen builtins. Anything
+outside that subset is a **parse error rather than a silent mistranslation**,
+which is the property that matters.
+
+**Nothing is excluded.** All sixteen primitives are generated, including the two
+that read data rather than computing from their dims. The one thing a shader and
+JavaScript genuinely cannot share is *how they reach that data* — one asks a
+sampler or reads an outline compiled into its own source, the other indexes an
+array — so those reads, and only those, are **intrinsics**: GLSL functions
+declared in `build-twins.mjs` to have a JS counterpart instead of being
+translated.
+
+| intrinsic | JS counterpart |
+| --- | --- |
+| `fieldSample(s, u, v, w)` | `sampleFieldUVW` — trilinear read of a `fields` grid |
+| `edgeCount(o)`, `edgeA(o, i)`, `edgeB(o, i)` | the flattened edges of a `profiles` outline |
+
+That is the whole seam, and it is two data reads wide. An undeclared intrinsic
+is an error, so it cannot widen by accident. Everything around them — the box
+union, the slab, the crossing count, the nearest-edge search — is ordinary GLSL
+and is generated like everything else.
+
+`profile`'s canonical source is therefore the **rolled** loop. What the GPU runs
+is `profileDecls`, which specialises that same loop by unrolling the edges; that
+is an optimisation forced by WebGL2, not a second definition, and `check-glsl`
+holds the unrolled form against the JS the rolled one generates. `library()`
+skips any source marked `spec`, since the rolled one names an `outline` type
+GLSL does not have.
 
 `check-glsl.mjs` also refuses a primitive present in one file and missing from
 the other.
@@ -304,6 +340,10 @@ exactly.
 SinterForm.profiles = [{ name, loops: [[[x, y], ...], ...] }];
 polygonSDF(loops, x, y) · profileExtent(loops)
 ```
+
+An empty slot — no entry, or one with no usable loops — is a **20 × 20 mm
+square**, matching the primitive's default dims, because a node may name a
+profile before the application has put anything in it.
 
 Loop 0 is the outer boundary and the rest are holes — containment is even-odd,
 so winding does not matter. `polygonSDF` is iq's: nearest edge for the

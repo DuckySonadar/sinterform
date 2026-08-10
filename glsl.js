@@ -168,31 +168,79 @@ const GLSL = {
   // has to know to pack it. Pack `round` there by mistake and the sample comes
   // back multiplied by zero: max(0, box), which draws as the bounding box and
   // looks exactly like a texture that never arrived.
+  // `fieldSample` is an INTRINSIC: build-twins.mjs substitutes a JS
+  // implementation for it rather than translating this body, because reading a
+  // grid is the one thing a shader and JavaScript genuinely do differently --
+  // one asks the sampler hardware, the other interpolates by hand. Everything
+  // around it is ordinary GLSL and is translated like any other primitive.
+  //
+  // Samples sit on the grid *corners*, spanning the box exactly, which is what
+  // sampleField and every baker in this repository mean. A texture's own
+  // coordinates put sample i at texel centre (i + 0.5)/n, so the mapping is
+  // corrected here rather than at each call site -- without it the shader
+  // reads a field stretched by half a texel at each end.
   field: { fn: 'pFieldS', sampler: true,
-    src: `float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
+    src: `float fieldSample(sampler3D s, float u, float v, float w){
+  vec3 sz = vec3(textureSize(s, 0));
+  vec3 t = (vec3(u, v, w)*(sz - 1.0) + 0.5)/sz;
+  return texture(s, clamp(t, 0.0, 1.0)).r;
+}
+
+float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
   vec3 q = abs(p) - d;
   float box = length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
   if (d.x <= 0.0) return 1e9;
   // the grid is stored with z fastest, so the texture is nz wide by ny by nx
   // and the lookup is (z, y, x), not (x, y, z)
-  vec3 uvw = (p + d)/(2.0*d);
-  float v = (texture(s, clamp(uvw.zyx, 0.0, 1.0)).r*2.0 - 1.0)*r;
+  vec3 uvw = clamp((p + d)/(2.0*d), 0.0, 1.0);
+  float v = (fieldSample(s, uvw.z, uvw.y, uvw.x)*2.0 - 1.0)*r;
   return max(v, box);
 }` },
 
   // A profile is the other one whose data cannot travel in the uniform block,
   // and it does not need to: an outline is a few hundred vec2s, and the
-  // distance to a polygon is a loop over its edges. So it arrives as generated
-  // source rather than as a texture -- `profileDecls` writes one function per
-  // profile, and `call` names the slot in the function rather than passing it.
-  // The src here is empty for that reason; there is nothing shared to emit.
-  profile: { fn: 'pProfile', slotted: true, src: '' }
+  // distance to a polygon is a loop over its edges.
+  //
+  // This is the definition -- rolled, with the outline reached through the
+  // `edgeCount`/`edgeA`/`edgeB` INTRINSICS, which is how the JS twin is
+  // derived from it. What the GPU actually runs is `profileDecls`, which
+  // specialises this same loop by unrolling the edges into straight-line code.
+  // That is an optimisation forced by WebGL2 (see the note there), not a
+  // second definition, and check-glsl holds the unrolled form against the JS
+  // this one generates.
+  profile: { fn: 'pProfile', slotted: true, spec: true,
+    src: `float pProfile(outline o, vec3 p, vec3 d, float r){
+  float dd = 1e18;
+  bool ins = false;
+  int n = edgeCount(o);
+  for (int i = 0; i < n; i++) {
+    vec2 A = edgeA(o, i);
+    vec2 B = edgeB(o, i);
+    vec2 e = B - A;
+    vec2 w = p.xy - A;
+    vec2 q = w - e*clamp(dot(w, e)/dot(e, e), 0.0, 1.0);
+    dd = min(dd, dot(q, q));
+    bool c1 = p.y >= A.y;
+    bool c2 = p.y < B.y;
+    float cr = e.x*w.y - e.y*w.x;
+    if ((c1 && c2 && cr > 0.0) || (!c1 && !c2 && cr < 0.0)) ins = !ins;
+  }
+  float da = (ins ? -1.0 : 1.0)*sqrt(dd);
+  float db = abs(p.z) - d.z;
+  return min(max(da, db), 0.0) + length(max(vec2(da, db), 0.0));
+}` }
 };
 
 // The whole primitive function library, ready to paste into a fragment
 // shader. Pass a key list to emit a subset.
+// A `spec` source is the primitive's *definition* -- what build-twins.mjs
+// translates -- and not code any shader runs: `profile`'s names an `outline`
+// type that GLSL does not have, because what the GPU runs is the unrolled
+// specialisation `profileDecls` writes. Emitting it would not compile.
 function library(keys) {
-  return (keys || Object.keys(GLSL)).map(k => GLSL[k].src).join('\n');
+  return (keys || Object.keys(GLSL))
+    .filter(k => !GLSL[k].spec)
+    .map(k => GLSL[k].src).join('\n');
 }
 
 // The call for one shape. `dims` and `round` are GLSL expressions the caller
@@ -229,18 +277,43 @@ function call(key, point, dims, round, field) {
 // on a software rasteriser that was the difference between a frame and forty
 // seconds. Straight-line code also lets the compiler fold each edge's vector
 // arithmetic at compile time, since both its ends are literals.
-function profileDecls(profiles) {
+// `count` is how many slots the shader must be able to name, which is a
+// property of the *plan* rather than of the library: a node may refer to slot 3
+// with nothing in it yet, and an undeclared pProfile3 is a compile error rather
+// than an empty shape. Defaults to one more than the library holds.
+function profileDecls(profiles, count) {
+  const list = profiles || [];
+  const n = Math.max(count | 0, list.length, 1);
   let s = '';
-  (profiles || []).forEach((pr, i) => {
+  for (let i = 0; i < n; i++) {
+    const pr = list[i];
     const loops = ((pr && pr.loops) || []).filter(l => l && l.length >= 3);
-    if (!loops.length) { s += profileStub(i); return; }
-    const f = (v) => (Number.isFinite(v) ? v : 0).toPrecision(8);
-    let body = '';
-    for (const poly of loops)
-      for (let a = 0, b = poly.length - 1; a < poly.length; b = a++)
-        body += `  E(vec2(${f(poly[a][0])},${f(poly[a][1])}),`
-              + `vec2(${f(poly[b][0])},${f(poly[b][1])}));\n`;
-    s += `float pProfile${i}(vec3 p, vec3 d){
+    s += emitProfile(i, loops.length ? loops : DEFAULT_OUTLINE);
+  }
+  return s;
+}
+
+// An empty slot is a 20 x 20 mm square, not nothing. A node can name a profile
+// the application has not filled in yet, and a primitive that evaluates to
+// nothing is one nobody can see to fix -- so it draws a default instead.
+//
+// This constant is the second copy of sinterform.js's DEFAULT_OUTLINE, and
+// deliberately so: the two files do not depend on each other. check-glsl holds
+// an empty slot's shader against the JS twin's, which is what stops the copies
+// drifting.
+const DEFAULT_OUTLINE = [[[-10, -10], [10, -10], [10, 10], [-10, 10]]];
+function profileStub(i) { return emitProfile(i, DEFAULT_OUTLINE); }
+
+// One slot's function: GLSL.profile.src is the definition, and this is that
+// same loop with its edges unrolled into straight-line code.
+function emitProfile(i, loops) {
+  const f = (v) => (Number.isFinite(v) ? v : 0).toPrecision(8);
+  let body = '';
+  for (const poly of loops)
+    for (let a = 0, b = poly.length - 1; a < poly.length; b = a++)
+      body += `  E(vec2(${f(poly[a][0])},${f(poly[a][1])}),`
+            + `vec2(${f(poly[b][0])},${f(poly[b][1])}));\n`;
+  return `float pProfile${i}(vec3 p, vec3 d){
   float dd = 1e18; bool ins = false;
 #define E(A, B) { vec2 e = (B) - (A), w = p.xy - (A); \\
   vec2 q = w - e*clamp(dot(w, e)/dot(e, e), 0.0, 1.0); \\
@@ -254,13 +327,6 @@ ${body}#undef E
   return min(max(da, db), 0.0) + length(max(vec2(da, db), 0.0));
 }
 `;
-  });
-  return s;
-}
-// A slot with no outline in it still has to compile: the shader is generated
-// from the plan, and a node can name a profile that is not there yet.
-function profileStub(i) {
-  return `float pProfile${i}(vec3 p, vec3 d){ return 1e9; }\n`;
 }
 
 function samplerDecls(count) {

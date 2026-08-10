@@ -94,6 +94,71 @@ function polygonSDF(loops, px, py) {
   return d === Infinity ? 1e9 : (inside ? -1 : 1) * Math.sqrt(d);
 }
 
+// ----------------------------------------------------------------------
+// The seam: the JS half of the intrinsics build-twins.mjs binds.
+//
+// Every primitive is defined once, in GLSL, and translated into the JS twins
+// below. Two of them read data rather than computing from their dims, and the
+// read is the one thing a shader and JavaScript genuinely do differently: the
+// shader asks a sampler or reads an outline compiled into its own source, and
+// JavaScript indexes an array. These functions are that difference, and there
+// is nothing else in it -- the box union, the slab, the crossing count and the
+// nearest-edge search are all translated.
+// ----------------------------------------------------------------------
+
+// An outline with no data still has to be a shape, because a node can name a
+// profile slot before the application has put anything in it -- and a
+// primitive that evaluates to nothing is a primitive nobody can see to fix. So
+// an empty slot is a 20 x 20 mm square, which is also what makes `profile`
+// appear in the viewer's every-primitive scene with no setup at all.
+const DEFAULT_OUTLINE = [[[-10, -10], [10, -10], [10, 10], [-10, 10]]];
+
+// The edges of an outline, flattened across its loops and cached on it: each
+// entry is Ax, Ay, Bx, By, where B is the *previous* vertex, matching the
+// pairing polygonSDF walks and the one profileDecls unrolls.
+function outlineEdges(o) {
+  const loops = (o && o.loops && o.loops.some(l => l && l.length >= 3))
+    ? o.loops : DEFAULT_OUTLINE;
+  if (o && o._edgeSrc === loops) return o._edges;
+  const e = [];
+  for (const poly of loops) {
+    if (!poly || poly.length < 3) continue;
+    for (let a = 0, b = poly.length - 1; a < poly.length; b = a++)
+      e.push(poly[a][0], poly[a][1], poly[b][0], poly[b][1]);
+  }
+  if (o) { o._edgeSrc = loops; o._edges = e; }
+  return e;
+}
+function edgeCount(o) { return outlineEdges(o).length / 4; }
+function edgeAx(o, i) { return outlineEdges(o)[4 * i]; }
+function edgeAy(o, i) { return outlineEdges(o)[4 * i + 1]; }
+function edgeBx(o, i) { return outlineEdges(o)[4 * i + 2]; }
+function edgeBy(o, i) { return outlineEdges(o)[4 * i + 3]; }
+
+// What `texture()` does to a field, in JavaScript. `u`, `v`, `w` are the
+// texture's own coordinates in its own order -- z, y, x -- and the result is
+// the raw sample in 0..1, the way GLSL hands back an R8 texel. Samples sit on
+// the grid corners, spanning the box exactly, which is what every baker here
+// writes; the shader's half-texel correction is in `fieldSample`.
+function sampleFieldUVW(f, u, v, w) {
+  if (!f || !f.data) return 0.5;              // 0.5 -> zero mm after decoding
+  const cl = (t, n) => Math.min(Math.max(t, 0), n - 1);
+  const gz = cl(u * (f.nz - 1), f.nz);
+  const gy = cl(v * (f.ny - 1), f.ny);
+  const gx = cl(w * (f.nx - 1), f.nx);
+  const x0 = Math.floor(gx), y0 = Math.floor(gy), z0 = Math.floor(gz);
+  const x1 = Math.min(x0 + 1, f.nx - 1), y1 = Math.min(y0 + 1, f.ny - 1),
+        z1 = Math.min(z0 + 1, f.nz - 1);
+  const tx = gx - x0, ty = gy - y0, tz = gz - z0;
+  const at = (i, j, k) => f.data[(i * f.ny + j) * f.nz + k];
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const c00 = lerp(at(x0, y0, z0), at(x1, y0, z0), tx);
+  const c10 = lerp(at(x0, y1, z0), at(x1, y1, z0), tx);
+  const c01 = lerp(at(x0, y0, z1), at(x1, y0, z1), tx);
+  const c11 = lerp(at(x0, y1, z1), at(x1, y1, z1), tx);
+  return lerp(lerp(c00, c10, ty), lerp(c01, c11, ty), tz) / 255;
+}
+
 // The half-extent of a profile in its own plane. A node carries this in its
 // dims because `ext` -- which is what bounds are computed from -- is handed
 // the dims and nothing else, the same way a field carries its box.
@@ -364,6 +429,49 @@ const TWINS = {
     let d_0 = d[0], d_1 = d[1], d_2 = d[2];
     return p_2;
   },
+  // pFieldS — from GLSL.field.src
+  field: (p, d, r, $node) => {
+    const s = fields[($node && $node.fi) || 0];
+    let p_0 = p[0], p_1 = p[1], p_2 = p[2];
+    let d_0 = d[0], d_1 = d[1], d_2 = d[2];
+    let q_0 = (Math.abs(p_0) - d_0), q_1 = (Math.abs(p_1) - d_1), q_2 = (Math.abs(p_2) - d_2);
+    let box = (Math.hypot(Math.max(q_0, 0.0), Math.max(q_1, 0.0), Math.max(q_2, 0.0)) + Math.min(Math.max(q_0, Math.max(q_1, q_2)), 0.0));
+    if ((d_0 <= 0.0)) {
+      return 1e9;
+    }
+    let uvw_0 = Math.min(Math.max(((p_0 + d_0) / (2.0 * d_0)), 0.0), 1.0), uvw_1 = Math.min(Math.max(((p_1 + d_1) / (2.0 * d_1)), 0.0), 1.0), uvw_2 = Math.min(Math.max(((p_2 + d_2) / (2.0 * d_2)), 0.0), 1.0);
+    let v = (((sampleFieldUVW(s, uvw_2, uvw_1, uvw_0) * 2.0) - 1.0) * r);
+    return Math.max(v, box);
+  },
+  // pProfile — from GLSL.profile.src
+  profile: (p, d, r, $node) => {
+    const o = profiles[($node && $node.fi) || 0];
+    let p_0 = p[0], p_1 = p[1], p_2 = p[2];
+    let d_0 = d[0], d_1 = d[1], d_2 = d[2];
+    let dd = 1e18;
+    let ins = false;
+    let n = edgeCount(o);
+    let i = 0;
+    for (; (i < n);) {
+      let A_0 = edgeAx(o, i), A_1 = edgeAy(o, i);
+      let B_0 = edgeBx(o, i), B_1 = edgeBy(o, i);
+      let e_0 = (B_0 - A_0), e_1 = (B_1 - A_1);
+      let w_0 = (p_0 - A_0), w_1 = (p_1 - A_1);
+      const t0 = Math.min(Math.max(((w_0*e_0 + w_1*e_1) / (e_0*e_0 + e_1*e_1)), 0.0), 1.0);
+      let q_0 = (w_0 - (e_0 * t0)), q_1 = (w_1 - (e_1 * t0));
+      dd = Math.min(dd, (q_0*q_0 + q_1*q_1));
+      let c1 = (p_1 >= A_1);
+      let c2 = (p_1 < B_1);
+      let cr = ((e_0 * w_1) - (e_1 * w_0));
+      if ((((c1 && c2) && (cr > 0.0)) || (((!c1) && (!c2)) && (cr < 0.0)))) {
+        ins = (!ins);
+      }
+      i += 1;
+    }
+    let da = ((ins ? (-1.0) : 1.0) * Math.sqrt(dd));
+    let db = (Math.abs(p_2) - d_2);
+    return (Math.min(Math.max(da, db), 0.0) + Math.hypot(Math.max(da, 0.0), Math.max(db, 0.0)));
+  },
 };
 // >>> generated twins
 
@@ -517,16 +625,7 @@ const PRIMS = {
     def: [0, 0, 0],
     // GLSL ES 3.0 allows a sampler as a function parameter, so one function
     // serves every slot and the generated call names its slot literally.
-    js: (p, d, r, n) => {
-      const f = fields[(n && n.fi) || 0];
-      if (!f) return 1e9;
-      const q = [Math.abs(p[0]) - d[0], Math.abs(p[1]) - d[1],
-                 Math.abs(p[2]) - d[2]];
-      const box = Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0),
-                             Math.max(q[2], 0))
-                + Math.min(Math.max(q[0], q[1], q[2]), 0);
-      return Math.max(sampleField(f, p[0], p[1], p[2]), box);
-    },
+    js: TWINS.field,
     ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
   },
 
@@ -543,15 +642,10 @@ const PRIMS = {
     name: 'Profile', round: false, baked: true,
     dims: [['Half width', 0.5, 200, 0.5], ['Half depth', 0.5, 200, 0.5],
            ['Half height', 0.25, 100, 0.25]],
-    def: [20, 20, 6],
-    js: (p, d, r, n) => {
-      const pr = profiles[(n && n.fi) || 0];
-      if (!pr || !pr.loops) return 1e9;
-      const a = polygonSDF(pr.loops, p[0], p[1]);
-      const b = Math.abs(p[2]) - d[2];
-      return Math.min(Math.max(a, b), 0)
-           + Math.hypot(Math.max(a, 0), Math.max(b, 0));
-    },
+    // the defaults match DEFAULT_OUTLINE, so a profile node with no outline
+    // behind it is a 20 x 20 x 12 mm slab rather than nothing at all
+    def: [10, 10, 6],
+    js: TWINS.profile,
     ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
   }
 };
@@ -569,6 +663,19 @@ function dimIsLength(t, i) {
 function dimUnit(t, i) {
   const dim = PRIMS[t] && PRIMS[t].dims[i];
   return dim && dim[4] !== undefined ? dim[4] : ' mm';
+}
+
+// What goes in the round slot. Every primitive but one puts its corner
+// rounding there; a baked field has no rounding and puts its *range* there
+// instead, because the range has to reach the shader somehow and that uniform
+// is spare. That used to be prose a consumer had to remember -- viewer.js
+// carried its own copy of the rule, and packing `round` there by mistake gives
+// a field multiplied by zero, which draws as its bounding box and looks
+// exactly like a texture that never arrived. Now both halves ask here.
+function roundSlot(n) {
+  if (n && n.t === 'field')
+    return ((fields[(n && n.fi) || 0] || {}).range) || 0;
+  return (n && n.round) || 0;
 }
 
 function smin(a, b, k) {
@@ -610,7 +717,7 @@ function sceneSDF(plan, x, y, z) {
       let pz = n.mz ? Math.abs(z) : z;
       e[0] = n.r[0] * RAD; e[1] = n.r[1] * RAD; e[2] = n.r[2] * RAD;
       invRot(px - n.p[0], py - n.p[1], pz - n.p[2], e, q);
-      const di = PRIMS[n.t].js(q, n.d, n.round || 0, n);
+      const di = PRIMS[n.t].js(q, n.d, roundSlot(n), n);
       if (n.op === 'add') d = smin(d, di, n.k);
       else if (n.op === 'cut') d = smax(d, -di, n.k);
       else d = smax(d, di, n.k);
@@ -778,7 +885,7 @@ const SinterForm = {
   set profiles(v) { profiles = v; },
   decodeField, encodeField, sampleField,
   polygonSDF, profileExtent,
-  smin, smax, invRot,
+  smin, smax, invRot, roundSlot,
   sceneSDF, sceneBounds, surfaceNets, meshToSTL
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterForm;

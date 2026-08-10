@@ -55,9 +55,9 @@ const SKIP = new Set(['plane', 'field']);   // infinite; needs a baked grid
 // exactly the primitive's default dims, so `ext` is tight rather than
 // generous -- a short box would show up in the bounds check.
 SF.profiles = [{ name: 'test cross', loops: [
-  [[-20, -8], [-8, -8], [-8, -20], [8, -20], [8, -8], [20, -8],
-   [20, 8], [8, 8], [8, 20], [-8, 20], [-8, 8], [-20, 8]],
-  [[-5, -5], [5, -5], [5, 5], [-5, 5]]
+  [[-10, -4], [-4, -4], [-4, -10], [4, -10], [4, -4], [10, -4],
+   [10, 4], [4, 4], [4, 10], [-4, 10], [-4, 4], [-10, 4]],
+  [[-2.5, -2.5], [2.5, -2.5], [2.5, 2.5], [-2.5, 2.5]]
 ] }];
 
 let worstEver = 0, worstWho = '';

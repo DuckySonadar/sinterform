@@ -102,9 +102,9 @@ const cases = KEYS.map(k => {
 // clamp, the crossing test -- this is where it shows.
 {
   const loops = [
-    [[-20, -8], [-8, -8], [-8, -20], [8, -20], [8, -8], [20, -8],
-     [20, 8], [8, 8], [8, 20], [-8, 20], [-8, 8], [-20, 8]],
-    [[-5, -5], [5, -5], [5, 5], [-5, 5]]
+    [[-10, -4], [-4, -4], [-4, -10], [4, -10], [4, -4], [10, -4],
+     [10, 4], [4, 4], [4, 10], [-4, 10], [-4, 4], [-10, 4]],
+    [[-2.5, -2.5], [2.5, -2.5], [2.5, 2.5], [-2.5, 2.5]]
   ];
   SF.profiles = [{ name: 'test cross', loops }];
   const d = [...SF.profileExtent(loops), 6];
@@ -116,6 +116,56 @@ const cases = KEYS.map(k => {
   }
   cases.push({ key: 'profile', fn: 'pProfile0', glsl: GL.profileDecls(SF.profiles),
                name: SF.PRIMS.profile.name, d, r: 0, slotted: true, pts });
+}
+
+// An empty slot, which is the default outline rather than nothing. That
+// default is written out twice on purpose -- once in each file, because they
+// do not depend on each other -- so this is what stops the two copies drifting
+// into different squares.
+{
+  const d = [10, 10, 6];
+  const pts = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.9;
+    pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.9;
+    pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 3.0;
+  }
+  cases.push({ key: 'profileDefault', fn: 'pProfile0', glsl: GL.profileDecls([]),
+               name: 'Profile (empty slot → default)', d, r: 0, slotted: true,
+               js: (p, dd, r) => SF.PRIMS.profile.js(p, dd, r, { fi: 99 }), pts });
+}
+
+// And `field`, which until now was the only primitive with no per-point check
+// at all -- the loop skips it as baked, and its two halves reach the samples
+// by genuinely different routes: the shader asks the sampler hardware, the JS
+// interpolates by hand. That is exactly the seam build-twins.mjs binds, so it
+// is exactly the thing worth measuring.
+//
+// A sphere baked onto a deliberately coarse grid, so trilinear interpolation
+// is doing visible work between samples rather than being a rounding detail.
+{
+  const box = [20, 15, 12], range = 10, nx = 17, ny = 13, nz = 11;
+  const data = new Uint8Array(nx * ny * nz);
+  let w = 0;
+  for (let i = 0; i < nx; i++)
+    for (let j = 0; j < ny; j++)
+      for (let k = 0; k < nz; k++) {
+        const x = -box[0] + 2 * box[0] * i / (nx - 1);
+        const y = -box[1] + 2 * box[1] * j / (ny - 1);
+        const z = -box[2] + 2 * box[2] * k / (nz - 1);
+        const v = (Math.hypot(x, y, z) - 9) / range;
+        data[w++] = Math.round((Math.min(Math.max(v, -1), 1) * 0.5 + 0.5) * 255);
+      }
+  SF.fields = [{ name: 'test sphere', nx, ny, nz, box, range, data, tex: null }];
+  const pts = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    pts[4 * i] = (rnd() * 2 - 1) * box[0] * 1.4;
+    pts[4 * i + 1] = (rnd() * 2 - 1) * box[1] * 1.4;
+    pts[4 * i + 2] = (rnd() * 2 - 1) * box[2] * 1.4;
+  }
+  cases.push({ key: 'field', fn: 'pFieldS', glsl: GL.library(['field']),
+               name: SF.PRIMS.field.name, d: box.slice(), r: range,
+               sampler: { nx, ny, nz, data: Array.from(data) }, pts });
 }
 
 const browser = await chromium.launch({
@@ -144,10 +194,12 @@ out vec4 outc;
 uniform sampler2D uPts;
 uniform vec3 uD;
 uniform float uR;
+${c.sampler ? 'precision highp sampler3D;\nuniform sampler3D uF;' : ''}
 ${c.glsl}
 void main(){
   vec3 p = texelFetch(uPts, ivec2(gl_FragCoord.xy), 0).xyz;
-  outc = vec4(${c.slotted ? `${c.fn}(p, uD)` : `${c.fn}(p, uD, uR)`}, 0.0, 0.0, 1.0);
+  outc = vec4(${c.sampler ? `${c.fn}(uF, p, uD, uR)`
+             : c.slotted ? `${c.fn}(p, uD)` : `${c.fn}(p, uD, uR)`}, 0.0, 0.0, 1.0);
 }`;
     const mk = (t, src) => {
       const s = gl.createShader(t);
@@ -187,6 +239,25 @@ void main(){
     gl.uniform1i(gl.getUniformLocation(prog, 'uPts'), 0);
     gl.uniform3f(gl.getUniformLocation(prog, 'uD'), c.d[0] || 0, c.d[1] || 0, c.d[2] || 0);
     gl.uniform1f(gl.getUniformLocation(prog, 'uR'), c.r);
+    // the same layout viewer.js uploads: nz wide by ny by nx, trilinear,
+    // edges clamped, which is what the JS twin's interpolation assumes
+    if (c.sampler) {
+      const f3 = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, f3);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, c.sampler.nz, c.sampler.ny,
+                    c.sampler.nx, 0, gl.RED, gl.UNSIGNED_BYTE,
+                    new Uint8Array(c.sampler.data));
+      for (const [k2, v2] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR],
+                              [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
+                              [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE],
+                              [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE],
+                              [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]])
+        gl.texParameteri(gl.TEXTURE_3D, k2, v2);
+      gl.uniform1i(gl.getUniformLocation(prog, 'uF'), 1);
+      gl.activeTexture(gl.TEXTURE0);
+    }
     gl.bindVertexArray(gl.createVertexArray());
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -197,7 +268,7 @@ void main(){
     results[c.key] = { vals };
   }
   return { results };
-}, { cases: cases.map(c => ({ ...c, pts: Array.from(c.pts) })), N });
+}, { cases: cases.map(({ js, ...c }) => ({ ...c, pts: Array.from(c.pts) })), N });
 
 await browser.close();
 
@@ -221,7 +292,7 @@ for (const c of cases) {
   let worst = 0, bad = 0, whereJs = 0, whereGl = 0, whereP = null;
   for (let i = 0; i < N * N; i++) {
     const p = [c.pts[4 * i], c.pts[4 * i + 1], c.pts[4 * i + 2]];
-    const j = SF.PRIMS[c.key].js(p, c.d, c.r, { fi: 0 });
+    const j = c.js ? c.js(p, c.d, c.r) : SF.PRIMS[c.key].js(p, c.d, c.r, { fi: 0 });
     const g = R.vals[i];
     const diff = Math.abs(j - g);
     if (diff > worst) { worst = diff; whereJs = j; whereGl = g; whereP = p; }

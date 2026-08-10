@@ -20,20 +20,50 @@
  * silent mistranslation, which is the property that matters -- a primitive that
  * cannot be translated must not quietly get a wrong twin.
  *
- * Two primitives are hand-written and excluded, for reasons that are not going
- * away:
+ * Nothing is excluded. Two primitives read data rather than computing from
+ * their dims -- `field` samples a grid, `profile` walks an outline -- and the
+ * one thing a shader and JavaScript genuinely cannot share is how they reach
+ * that data: one asks a sampler, the other indexes an array. So those reads,
+ * and only those, are INTRINSICS: named GLSL functions declared here to have a
+ * JS counterpart instead of being translated. Everything around them -- the
+ * box union, the slab, the crossing count, the nearest-edge search -- is
+ * ordinary GLSL and is generated like everything else.
  *
- *   field    reads a sampler3D. The JS side reads `fields` and interpolates in
- *            JavaScript; there is no translation between those, only a binding.
- *   profile  is generated source with a preprocessor macro, and its JS side is
- *            polygonSDF, shared with the sketchers.
+ * That is the whole of the seam, and it is two functions wide. An intrinsic
+ * must be declared below; an undeclared call is an error, so the seam cannot
+ * widen by accident.
  */
 import { readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const HAND_WRITTEN = new Set(['field', 'profile']);
+
+// The seam. `js` is the JavaScript that replaces a call to the GLSL function
+// of that name; `$0`, `$1`, ... are its arguments, already emitted. `t` is what
+// the call returns, so the rest of the expression still type-checks.
+//
+// `opaque` names parameter types that carry no components -- a sampler is a
+// handle, not a number -- and `bind` says what that handle is in JavaScript.
+// This is where `fields` and `profiles` enter: the shader is handed a texture
+// unit or a compiled-in outline by its call site, and the JS twin is handed
+// the node and looks the same data up itself.
+const INTRINSICS = {
+  fieldSample: { t: 'float', js: 'sampleFieldUVW($0, $1, $2, $3)' },
+  edgeCount:   { t: 'int',   js: 'edgeCount($0)' },
+  // one JS expression per component, so a vec2 intrinsic does not have to be
+  // called twice to be taken apart
+  edgeA:       { t: 'vec2',  js: ['edgeAx($0, $1)', 'edgeAy($0, $1)'] },
+  edgeB:       { t: 'vec2',  js: ['edgeBx($0, $1)', 'edgeBy($0, $1)'] }
+};
+// `$node` rather than `n`: a GLSL local may legitimately be called `n`, and a
+// generated `let n` beside a parameter `n` is a SyntaxError rather than a
+// wrong answer -- but only by luck, so the name is put out of reach instead.
+const NODE_ARG = '$node';
+const OPAQUE = {
+  sampler3D: `fields[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
+  outline:   `profiles[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`
+};
 
 // ---------------------------------------------------------------- tokens ----
 const PUNC = ['<=', '>=', '==', '!=', '&&', '||', '+=', '-=', '*=', '/=',
@@ -72,7 +102,7 @@ function lex(src) {
 // Straight recursive descent; the expression half is precedence climbing. The
 // AST is deliberately dumb -- types are worked out during emission, where the
 // scope is, rather than in a pass of its own.
-const TYPES = new Set(['float', 'vec2', 'vec3', 'void', 'bool']);
+const TYPES = new Set(['float', 'vec2', 'vec3', 'void', 'bool', 'int']);
 const BIN = [['||', 1], ['&&', 2], ['==', 3], ['!=', 3],
              ['<', 4], ['>', 4], ['<=', 4], ['>=', 4],
              ['+', 5], ['-', 5], ['*', 6], ['/', 6]];
@@ -138,6 +168,19 @@ function parse(src) {
     return c;
   }
 
+  // `i++` or an ordinary assignment, with no trailing semicolon
+  function forStep() {
+    const lv = lvalue();
+    if (is('op', '+') && peek(1).k === 'op' && peek(1).v === '+') {
+      next(); next();
+      return { n: 'assign', lv, op: '+=', e: { n: 'num', v: '1' } };
+    }
+    const op = eat('op').v;
+    if (!['=', '+=', '-=', '*=', '/='].includes(op))
+      throw new Error(`expected an assignment in the for step, got ${op}`);
+    return { n: 'assign', lv, op, e: expr() };
+  }
+
   function lvalue() {
     const name = eat('id').v;
     let s = null;
@@ -154,6 +197,16 @@ function parse(src) {
       return { n: 'block', body };
     }
     if (is('id', 'return')) { next(); const e = expr(); eat('op', ';'); return { n: 'ret', e }; }
+    // for (init; test; step) body -- the only loop the primitives need, and
+    // deliberately the only one accepted: a while would let a translated
+    // primitive fail to terminate in a way the GLSL would not.
+    if (is('id', 'for')) {
+      next(); eat('op', '(');
+      const init = statement();               // consumes its own ';'
+      const test = expr(); eat('op', ';');
+      const step = forStep(); eat('op', ')');
+      return { n: 'for', init, test, step, body: statement() };
+    }
     if (is('id', 'if')) {
       next(); eat('op', '(');
       const c = expr(); eat('op', ')');
@@ -185,32 +238,38 @@ function parse(src) {
     return { n: 'assign', lv, op, e };
   }
 
-  // float NAME(type a, type b, ...) { ... }
-  eat('id', 'float');
-  const fname = eat('id').v;
-  eat('op', '(');
-  const params = [];
-  if (!is('op', ')')) {
-    for (;;) {
-      const t = eat('id').v, name = eat('id').v;
-      params.push({ t, name });
-      if (is('op', ',')) { next(); continue; }
-      break;
+  // A source may hold more than one function -- an intrinsic's own GLSL body
+  // sits beside the primitive that calls it. Every definition is parsed; the
+  // caller picks the one it wants and skips the intrinsics.
+  const fns = [];
+  while (!is('eof')) {
+    eat('id', 'float');
+    const fname = eat('id').v;
+    eat('op', '(');
+    const params = [];
+    if (!is('op', ')')) {
+      for (;;) {
+        const t = eat('id').v, name = eat('id').v;
+        params.push({ t, name });
+        if (is('op', ',')) { next(); continue; }
+        break;
+      }
     }
+    eat('op', ')');
+    eat('op', '{');
+    const body = [];
+    while (!is('op', '}')) body.push(statement());
+    eat('op', '}');
+    fns.push({ fname, params, body });
   }
-  eat('op', ')');
-  eat('op', '{');
-  const body = [];
-  while (!is('op', '}')) body.push(statement());
-  eat('op', '}');
-  return { fname, params, body };
+  return fns;
 }
 
 // --------------------------------------------------------------- emitter ----
 // A value is its type and one JS expression per component. Everything is
 // scalarised: `vec3 q` becomes q_0, q_1, q_2, which is what the hand-written
 // twins did by eye and is the only reason they were readable.
-const WIDTH = { float: 1, vec2: 2, vec3: 3, bool: 1 };
+const WIDTH = { float: 1, vec2: 2, vec3: 3, bool: 1, int: 1 };
 const SWZ = { x: 0, y: 1, z: 2, r: 0, g: 1, b: 2 };
 
 function emit(fn) {
@@ -220,6 +279,7 @@ function emit(fn) {
   const fresh = () => `t${tmp++}`;
 
   const val = (t, parts) => ({ t, p: parts });
+  let depth = 2;                       // indent that `hold` writes at
   const wide = (t) => WIDTH[t];
 
   // bind an expression's components to fresh consts, so a value used twice --
@@ -227,7 +287,8 @@ function emit(fn) {
   function hold(v) {
     if (v.p.every(s => /^[A-Za-z_$][\w$]*$/.test(s) || /^-?[\d.]+$/.test(s))) return v;
     const names = v.p.map(() => fresh());
-    lines.push(`const ${names.map((n, i) => `${n} = ${v.p[i]}`).join(', ')};`);
+    lines.push('  '.repeat(depth)
+      + `const ${names.map((n, i) => `${n} = ${v.p[i]}`).join(', ')};`);
     return val(v.t, names);
   }
 
@@ -252,6 +313,7 @@ function emit(fn) {
     switch (node.n) {
       case 'num': return val('float', [NUM(node.v)]);
       case 'var': {
+        if (node.v === 'true' || node.v === 'false') return val('bool', [node.v]);
         const v = scope.get(node.v);
         if (!v) throw new Error(`unknown identifier ${node.v}`);
         return val(v.t, v.names.slice());
@@ -289,6 +351,19 @@ function emit(fn) {
 
   function call(node) {
     const f = node.f;
+    // the seam: a declared intrinsic is substituted, not translated
+    if (f in INTRINSICS) {
+      const spec = INTRINSICS[f];
+      const A = node.args.map(a => ex(a).p[0]);
+      const sub = (s) => s.replace(/\$(\d+)/g, (_, i) => {
+        if (A[+i] === undefined) throw new Error(`${f}() wants argument ${i}`);
+        return A[+i];
+      });
+      const parts = (Array.isArray(spec.js) ? spec.js : [spec.js]).map(sub);
+      if (parts.length !== WIDTH[spec.t])
+        throw new Error(`intrinsic ${f} declares ${spec.t} but gives ${parts.length} parts`);
+      return val(spec.t, parts);
+    }
     // constructors: flatten every argument's components, then take or splat
     if (f === 'vec2' || f === 'vec3') {
       const n = f === 'vec2' ? 2 : 3;
@@ -339,6 +414,7 @@ function emit(fn) {
   }
 
   function stmt(s, indent) {
+    depth = indent;
     const pad = '  '.repeat(indent);
     const push = (t) => lines.push(pad + t);
     switch (s.n) {
@@ -346,6 +422,9 @@ function emit(fn) {
         for (const d of s.decls) {
           const n = wide(s.t);
           const names = n === 1 ? [d.name] : [0, 1, 2].slice(0, n).map(i => `${d.name}_${i}`);
+          if (RESERVED.has(d.name))
+            throw new Error(`local \`${d.name}\` would shadow the JS argument of `
+              + `the same name -- rename it in the GLSL`);
           if (d.init) {
             const v = ex(d.init);
             if (wide(v.t) !== n && wide(v.t) !== 1)
@@ -388,6 +467,25 @@ function emit(fn) {
         push(`}`);
         return;
       }
+      case 'for': {
+        // The test and step are re-emitted each pass, so anything `hold` binds
+        // for them has to land inside the loop rather than before it -- which
+        // it does, because stmt() writes in order and these are emitted here.
+        const save = lines.length;
+        stmt(s.init, indent);
+        const initLines = lines.splice(save, lines.length - save);
+        const t0 = lines.length;
+        const test = ex(s.test);
+        const testPre = lines.splice(t0, lines.length - t0);
+        if (testPre.length)
+          throw new Error('a loop test that needs temporaries is not supported');
+        lines.push(...initLines);
+        push(`for (; ${test.p[0]};) {`);
+        stmt(s.body, indent + 1);
+        stmt(s.step, indent + 1);
+        push(`}`);
+        return;
+      }
       case 'block': { for (const b of s.body) stmt(b, indent); return; }
       default: throw new Error(`cannot emit statement ${s.n}`);
     }
@@ -397,7 +495,20 @@ function emit(fn) {
   // them -- pOcta writes `p = abs(p)` -- and a component-wise write cannot go
   // back into the caller's array.
   const args = [];
+  let needsNode = false;
+  const RESERVED = new Set(fn.params.filter(q => WIDTH[q.t] === 1).map(q => q.name)
+                           .concat([NODE_ARG]));
   for (const prm of fn.params) {
+    // An opaque parameter is a handle to data the shader was handed by its
+    // call site -- a texture unit, a compiled-in outline. The JS twin is not
+    // handed it; it is handed the node and looks the data up, which is why
+    // this is a binding rather than an argument.
+    if (prm.t in OPAQUE) {
+      needsNode = true;
+      lines.push(`const ${prm.name} = ${OPAQUE[prm.t]};`);
+      scope.set(prm.name, { t: 'opaque', names: [prm.name] });
+      continue;
+    }
     const n = wide(prm.t);
     if (!n) throw new Error(`unsupported parameter type ${prm.t}`);
     args.push(prm.name);
@@ -416,7 +527,11 @@ function emit(fn) {
     for (const s of fn.body) stmt(s, 2);
     bodyLines.push(...outer.splice(save, outer.length - save));
   }
-  return [...head, ...bodyLines.map(l => l.startsWith('    ') ? l : '    ' + l)].join('\n');
+  if (needsNode) args.push(NODE_ARG);
+  return {
+    args,
+    body: [...head, ...bodyLines.map(l => l.startsWith('    ') ? l : '    ' + l)].join('\n')
+  };
 }
 
 // ------------------------------------------------------------------ main ----
@@ -427,15 +542,19 @@ const GL = mod.exports;
 const parts = [];
 const done = [];
 for (const key of GL.KEYS) {
-  if (HAND_WRITTEN.has(key)) continue;
   const src = GL.GLSL[key].src;
   if (!src || !src.trim()) throw new Error(`${key}: no GLSL source to translate`);
-  let fn;
-  try { fn = parse(src); } catch (e) { throw new Error(`${key}: ${e.message}`); }
-  let body;
-  try { body = emit(fn); } catch (e) { throw new Error(`${key}: ${e.message}`); }
-  const args = fn.params.map(p => p.name).join(', ');
-  parts.push(`  // ${fn.fname} — from GLSL.${key}.src\n  ${key}: (${args}) => {\n${body}\n  },`);
+  let fns;
+  try { fns = parse(src); } catch (e) { throw new Error(`${key}: ${e.message}`); }
+  // an intrinsic's own GLSL body rides along in the same source; the primitive
+  // is the one the table names
+  const want = GL.GLSL[key].fn;
+  const fn = fns.find(f => f.fname === want);
+  if (!fn) throw new Error(`${key}: no function named ${want} in its source`);
+  let out;
+  try { out = emit(fn); } catch (e) { throw new Error(`${key}: ${e.message}`); }
+  parts.push(`  // ${fn.fname} — from GLSL.${key}.src\n`
+    + `  ${key}: (${out.args.join(', ')}) => {\n${out.body}\n  },`);
   done.push(key);
 }
 
