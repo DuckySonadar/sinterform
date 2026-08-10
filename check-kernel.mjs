@@ -20,6 +20,7 @@
  * Exit code is 0 or 1, so it can be a CI step.
  */
 import { readFileSync } from 'fs';
+import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join, relative } from 'path';
 
@@ -225,6 +226,24 @@ const probe = [{ name: 'probe' }];
 SF.fields = probe;
 ok(SF.fields === probe, 'and assigning to it is visible through the kernel');
 SF.fields = [];
+
+// ======================================================================
+// The generated block is current
+// ======================================================================
+// The JS twins are derived from the GLSL, not written beside it. That only
+// holds if the committed file is what the generator produces -- otherwise
+// someone edits a twin by hand, it works, and the derivation is a fiction
+// until the next regeneration silently reverts their fix.
+//
+// This runs the generator in --check mode, which rewrites nothing and exits
+// non-zero if sinterform.js is stale.
+{
+  const r = spawnSync(process.execPath, [join(HERE, 'build-twins.mjs'), '--check'],
+                      { encoding: 'utf8' });
+  const out = ((r.stdout || '') + (r.stderr || '')).trim();
+  ok(r.status === 0, `the generated twins are current`
+    + (r.status === 0 ? ` — ${out}` : `\n        ${out}`));
+}
 
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);
 process.exit(fail ? 1 : 0);

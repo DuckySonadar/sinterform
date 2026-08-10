@@ -6,16 +6,19 @@ STL output. Dependency-free JavaScript.
 
 | file | what |
 | --- | --- |
-| `sinterform.js` | the kernel — geometry, and nothing that knows a GPU exists |
-| `glsl.js` | the shader half of each primitive, and the two shader budgets |
+| `glsl.js` | **each primitive's definition**, as GLSL, plus the two shader budgets |
+| `sinterform.js` | the kernel — those definitions translated to JS, booleans, bounds, meshing |
+| `build-twins.mjs` | the translator; `--check` fails if the generated block is stale |
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
 | `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
 | `sweep.js` | a profile dragged along a sketch path, flat or through space |
 | `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
 | `demo3d.html` | the 3D sketcher, drawn rough and solved in front of you |
 
-They are separate because they are used separately: a mesher, a slicer or a
-test wants the first and not the second.
+The first two are one kernel in two languages: `glsl.js` is where a primitive
+is *defined*, and the JS in `sinterform.js` is that definition translated. They
+are separate files because they are used separately — a mesher, a slicer or a
+test wants the JS and no GPU at all.
 
 It computes geometry and hands it back. There is no DOM in it, no WebGL, no
 storage, no state belonging to whatever is using it — which is what makes it
@@ -138,9 +141,9 @@ const plan = [
 ```js
 sceneSDF(plan, x, y, z) → number
 ```
-Signed distance to the whole scene at a point, in mm. This is the JS side of
-each primitive; `glsl.js` holds the GLSL side, and `check-glsl.mjs` is what
-keeps the two in step now that they no longer share a file.
+Signed distance to the whole scene at a point, in mm. This runs the JS twins,
+which are generated from the GLSL in `glsl.js` — see *One definition, two
+halves* below.
 
 ```js
 sceneBounds(nodes) → { lo: [x, y, z], hi: [x, y, z] } | null
@@ -235,11 +238,41 @@ sounds: a raymarcher folds every shape into one `min`, so the loosest
 primitive in the library sets the step size for every ray in the scene.
 `check-primitives.mjs` prints the maximum safe step the set implies.
 
-To add a primitive, add a `js` entry in `sinterform.js` and a `glsl.js` entry
-with the same key. They must agree; a mismatch shows up as a preview that
-disagrees with the exported mesh. They used to sit side by side in one file,
-which was the only thing keeping them in step — now `check-glsl.mjs` is, and
-it also refuses a primitive present in one file and missing from the other.
+### One definition, two halves
+
+**The GLSL is the definition.** The JS twins in `sinterform.js` are generated
+from it by `build-twins.mjs`, into a marked block that says so. To add or change
+a primitive, write the GLSL in `glsl.js` and run:
+
+```
+node build-twins.mjs           # rewrite the generated block
+node build-twins.mjs --check   # exit 1 if it is stale (check-kernel does this)
+```
+
+There is no build step for *consumers* — the generated code is committed, so
+`sinterform.js` is still one file you can drop in a page. Only someone changing
+a primitive runs the generator.
+
+This replaced two hand-written halves. `check-glsl.mjs` existed to catch them
+drifting, and it was a drift alarm rather than a proof — it had already missed
+one: the cone's GLSL divided by `dot(k2, k2)` unguarded while its JS twin wrote
+`|| 1e-9`, a real difference in a degenerate case the random-point comparison
+never landed on. That check still runs and still compiles the real shader, but
+it is now asking whether a translation is faithful rather than whether two
+authors agreed, and `check-kernel.mjs` refuses a stale generated block so a
+hand-edited twin cannot creep back.
+
+The generator parses the subset of GLSL ES 3.0 the primitives actually use —
+`float`/`vec2`/`vec3`, no loops, twelve builtins, 114 lines across all of them.
+Anything outside that subset is a **parse error rather than a silent
+mistranslation**, which is the property that matters. Two primitives are
+hand-written and excluded, both recorded in the generated block's header:
+`field` reads a `sampler3D` and its JS side interpolates `fields` in JavaScript
+(a binding, not a translation), and `profile` is generated source with a
+preprocessor macro whose JS side is `polygonSDF`, shared with the sketchers.
+
+`check-glsl.mjs` also refuses a primitive present in one file and missing from
+the other.
 
 ### Baked fields
 
