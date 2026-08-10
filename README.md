@@ -282,6 +282,25 @@ one of the three the shape actually reads.
 `profiles` is a getter/setter pair with the same rule as `fields`: assign to
 `SinterForm.profiles`, never write through a captured local.
 
+Neither sketch module needs to know this file exists to produce one, because a
+profile and a node are both plain data. `S.shape(height)` in `sketch.js` and
+`S.shape(face, height)` in `sketch3d.js` hand back `{ profile, node }` ready to
+use:
+
+```js
+const { profile, node } = S.shape(S.profile().faces[0], 8);
+SinterForm.profiles = [profile];
+SinterForm.sceneSDF([{ id: 0, nodes: [node] }], x, y, z);
+```
+
+Loops come back centred on their own bounding box with the node moved to
+match, so bounds are tight rather than wherever the sketch was drawn. Height
+runs symmetrically about the sketch plane unless `base` is given. The 3D
+version is the one worth having: a face has a plane of its own, and inverting
+that plane into the `Rz·Ry·Rx` the kernel applies — including the edge-on case
+where `ry` is ±90° and `rz` and `rx` turn about the same line — is algebra no
+caller should write twice.
+
 On the GPU the outline is not a uniform and not a texture — `GL.profileDecls`
 writes one function per profile with the edges **unrolled into the source**.
 That is not cosmetic. Reading a dynamically indexed `const vec2[]` array in

@@ -194,14 +194,13 @@ const SCENES = {
     S.constrain('concentric', bore, arcR);
     S.solve();
 
-    // The loops, centred, handed over as loops. No grid, no bytes: the shader
-    // walks the same edges the JS twin does.
-    const loops = S.profile(0.05).loops.map(l => l.points.map(q => [q[0] - L / 2, q[1]]));
-    SinterForm.profiles = [{ name: 'sketch 2D', loops }];
-    const e = SinterForm.profileExtent(loops);
-    return [{ id: 0, nodes: [
-      N('profile', { p: [0, 0, H / 2 + 4], d: [e[0], e[1], H / 2], fi: 0 })
-    ] }];
+    // One call, and the sketch is a shape: an outline and a node, which is
+    // the same pair a sphere would be. No grid, no bytes, nothing meshed --
+    // the shader walks the same edges the JS twin does.
+    const { profile, node } = S.shape(H, { name: 'sketch 2D', tol: 0.05 });
+    SinterForm.profiles = [profile];
+    node.p[2] += H / 2 + 4;                       // stand it on the grid
+    return [{ id: 0, nodes: [N('profile', node)] }];
   },
 
   // The same thing one dimension up: a plate drawn in a plane of its own,
@@ -227,29 +226,15 @@ const SCENES = {
     S.constrain('parallel', { e: bore, t: S.param(Math.PI / 2, { fixed: true }) }, { e: e[0] });
     S.solve();
 
-    // A face already knows its own plane, and profile() hands its loops back in
-    // that plane's coordinates -- so the extrusion is the same primitive with
-    // the node turned to match, and nothing has to be baked to get it there.
-    // The angles are the plane's own frame read back as Rz.Ry.Rx, which is the
-    // rotation the kernel applies.
+    // Exactly the same call as the 2D scene. A face already knows its own
+    // plane, so `shape` is the one that turns that plane into the Rz.Ry.Rx the
+    // kernel applies -- which is the only thing the extra dimension costs, and
+    // the reason it is written in sketch3d.js rather than here.
     const face = S.profile(0.05).faces[0];
-    const outer = face.loops[0].uv;
-    const ctr = outer.reduce((a, q) => [a[0] + q[0], a[1] + q[1]], [0, 0])
-                     .map(z => z / outer.length);
-    const loops = face.loops.map(l => l.uv.map(q => [q[0] - ctr[0], q[1] - ctr[1]]));
-    SinterForm.profiles = [{ name: 'sketch 3D', loops }];
-    const ext = SinterForm.profileExtent(loops);
-    const fu = face.u, fv = face.v, fn = face.normal, deg = 180 / Math.PI;
-    const ang = [Math.atan2(fv[2], fn[2]) * deg,
-                 Math.asin(-Math.min(1, Math.max(-1, fu[2]))) * deg,
-                 Math.atan2(fu[1], fu[0]) * deg];
-    // the face's own centre in world, lifted clear of the plate
-    const mid = [0, 1, 2].map(i => face.origin[i] + fu[i] * ctr[0] + fv[i] * ctr[1]);
-    const lift = ext[0] + ext[1] + T;
-    return [{ id: 0, nodes: [
-      N('profile', { p: [mid[0], mid[1], mid[2] + lift], r: ang,
-                     d: [ext[0], ext[1], T / 2], fi: 0 })
-    ] }];
+    const { profile, node } = S.shape(face, T, { name: 'sketch 3D' });
+    SinterForm.profiles = [profile];
+    node.p[2] += node.d[0] + node.d[1] + T;       // stand it clear of the grid
+    return [{ id: 0, nodes: [N('profile', node)] }];
   },
 
   'ice cream': () => [{ id: 0, nodes: [

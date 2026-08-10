@@ -1545,6 +1545,61 @@ Sketch3D.prototype.extrude = function (face, height, tol) {
   return f;
 };
 
+// The same extrusion as a *shape*: something a renderer can raymarch beside a
+// sphere, rather than a closure it has to sample onto a grid first.
+//
+// This is the 2D file's `shape` one dimension up, and the lift is the whole
+// point of it. In the plane the answer is trivial -- the loops are already in
+// XY and the rotation is zero. In space the face has a plane of its own, and
+// turning that plane into the Rz.Ry.Rx the kernel applies is frame algebra
+// that every caller would otherwise write again, slightly differently. So it
+// is written once, here, where the frame came from.
+//
+//   const { profile, node } = S.shape(S.profile().faces[0], 8);
+//
+// The columns of Rz.Ry.Rx are the face's own u, v and normal, which is what
+// makes this invertible: read the second row of the first column for ry, the
+// rest of that column for rz, and the third row of the other two for rx. Edge
+// on -- a face whose u axis is vertical -- rz and rx turn about the same line
+// and only their sum is determined, so rz is pinned to zero and rx carries it.
+Sketch3D.prototype.shape = function (face, height, opts) {
+  opts = opts || {};
+  if (typeof face === 'number' || face === undefined)
+    face = this.profile(opts.tol).faces[face || 0];
+  if (!face || !face.loops || !face.loops.length)
+    throw new Error('shape wants a face from profile()');
+  const h = height === undefined ? 1 : height;
+  const loops = face.loops.map(l => l.uv).filter(l => l.length >= 3);
+  if (!loops.length) throw new Error('shape wants at least one closed loop');
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const l of loops) for (const p of l) {
+    if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+    if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+  }
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const U = face.u, V = face.v, N = face.normal, o = face.origin;
+  const mid = opts.base === undefined ? 0 : opts.base + h / 2;
+
+  const deg = 180 / Math.PI, cl = (t) => Math.min(1, Math.max(-1, t));
+  const ry = Math.asin(-cl(U[2]));
+  let rz, rx;
+  if (Math.abs(U[2]) > 1 - 1e-9) { rz = 0; rx = Math.atan2(-V[0] * U[2], V[1]); }
+  else { rz = Math.atan2(U[1], U[0]); rx = Math.atan2(V[2], N[2]); }
+
+  return {
+    profile: { name: opts.name || 'sketch3d',
+               loops: loops.map(l => l.map(p => [p[0] - cx, p[1] - cy])) },
+    node: {
+      t: 'profile', on: true, op: 'add', k: 0, b: 0, round: 0,
+      mx: false, my: false, mz: false,
+      p: [0, 1, 2].map(i => o[i] + U[i] * cx + V[i] * cy + N[i] * mid),
+      r: [rx * deg, ry * deg, rz * deg],
+      d: [(x1 - x0) / 2, (y1 - y0) / 2, Math.abs(h) / 2],
+      fi: opts.fi || 0
+    }
+  };
+};
+
 // Distance to a segment, which is all a wire is made of.
 function segDist(a, b, px, py, pz) {
   const ex = b[0] - a[0], ey = b[1] - a[1], ez = b[2] - a[2];

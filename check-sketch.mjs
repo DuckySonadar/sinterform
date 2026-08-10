@@ -851,6 +851,32 @@ console.log('\n--- and the whole way through to a solid ---');
 
   const stl = SF.meshToSTL(mesh, 'sinterform extruded sketch (mm)');
   ok(stl && stl.size === 84 + nt * 50, `and writes an STL of ${stl.size.toLocaleString()} bytes`);
+
+  // ---- and the same solid without meshing it at all ---------------------
+  // `shape()` hands back a node, and a node is what a sphere is. Nothing is
+  // sampled, nothing is baked: the kernel evaluates the outline directly, so
+  // this is the same distance function the mesh above was built from -- which
+  // is exactly what has to be true for a raymarcher to draw it.
+  const { profile, node } = S.shape(H, { tol: 0.001 });
+  SF.profiles = [profile];
+  const plan = [{ id: 0, nodes: [node] }];
+  let sd = 0x51ed270b;
+  const rnd = () => { sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; };
+  let worst = 0, wp = null;
+  for (let i = 0; i < 20000; i++) {
+    const p = [lo[0] - 4 + (hi[0] - lo[0] + 8) * rnd(),
+               lo[1] - 4 + (hi[1] - lo[1] + 8) * rnd(),
+               lo[2] - 4 + (hi[2] - lo[2] + 8) * rnd()];
+    const e = Math.abs(solid(p[0], p[1], p[2]) - SF.sceneSDF(plan, p[0], p[1], p[2]));
+    if (e > worst) { worst = e; wp = p; }
+  }
+  ok(worst < 1e-9, `shape() is the same solid, unmeshed (worst ${worst.toExponential(2)} mm`
+    + (worst < 1e-9 ? ')' : ` at [${wp.map(v => v.toFixed(2))}])`));
+
+  const bb = SF.sceneBounds(plan[0].nodes);
+  ok(bb && [0, 1, 2].every(i => bb.lo[i] <= lo[i] + pad + 1e-9
+                             && bb.hi[i] >= hi[i] - pad - 1e-9),
+     `and its bounds contain it without being told where it is`);
 }
 
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);

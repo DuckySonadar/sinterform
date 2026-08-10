@@ -1058,5 +1058,57 @@ console.log('\n--- and out the other end: a mesh ---');
      `its volume ${m3.volume.toFixed(1)} mm³ is about the three capsules’ ${wantW.toFixed(1)}`);
 }
 
+// ======================================================================
+console.log('\n--- or out the other end without a mesh: a shape ---');
+{
+  // A face is a plane in space, and the kernel turns shapes by Rz.Ry.Rx. So
+  // `shape()` has to invert that composition to hand back a node, and this is
+  // where that inversion is held against the extrusion it is meant to equal:
+  // same solid, no grid, no mesh, evaluated by the kernel the way a sphere is.
+  //
+  // The orientations are chosen to include the two the algebra can lose: a
+  // face turned edge on, where ry is +/-90 degrees and rz and rx turn about
+  // the same line. If the gimbal branch is wrong, only those two fail.
+  const SF = load('sinterform.js');
+  const ROTS = [[0, 0, 0], [0.34, -0.42, 0.7], [Math.PI / 2, 0, 0],
+                [0, Math.PI / 2, 0], [0.9, Math.PI / 2, 0.4], [-1.2, 0.3, 2.8]];
+  let sd = 0x1f83d9ab;
+  const rnd = () => { sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; };
+  let worstAll = 0, boundsOk = 0;
+
+  for (const rot of ROTS) {
+    const S = new Sketch3D();
+    const F = M3.frameOf(rot[0], rot[1], rot[2]), U = F[0], V = F[1];
+    const at = (a, b) => S.point(U[0] * a + V[0] * b + 3,
+                                 U[1] * a + V[1] * b - 5,
+                                 U[2] * a + V[2] * b + 2);
+    const c = [at(0, 0), at(34, 0), at(34, 20), at(0, 20)];
+    c.forEach(p => S.fix(p));
+    S.line(c[0], c[1]); S.line(c[1], c[2]); S.line(c[2], c[3]); S.line(c[3], c[0]);
+
+    const face = S.profile(0.01).faces[0], H = 7;
+    const f = S.extrude(face, H);
+    // base 0 because extrude() runs material from the plane, not about it
+    const { profile, node } = S.shape(face, H, { base: 0 });
+    SF.profiles = [profile];
+    const plan = [{ id: 0, nodes: [node] }];
+
+    const lo = f.bounds.lo, hi = f.bounds.hi;
+    let worst = 0;
+    for (let i = 0; i < 20000; i++) {
+      const p = [0, 1, 2].map(k => lo[k] - 6 + (hi[k] - lo[k] + 12) * rnd());
+      worst = Math.max(worst, Math.abs(f(...p) - SF.sceneSDF(plan, ...p)));
+    }
+    worstAll = Math.max(worstAll, worst);
+    const bb = SF.sceneBounds(plan[0].nodes);
+    if (bb && [0, 1, 2].every(k => bb.lo[k] <= lo[k] + 1e-6 && bb.hi[k] >= hi[k] - 1e-6))
+      boundsOk++;
+  }
+  ok(worstAll < 1e-9, `shape() is extrude(), unmeshed, at every orientation `
+    + `(worst ${worstAll.toExponential(2)} mm over ${ROTS.length})`);
+  ok(boundsOk === ROTS.length, `and the node's own bounds contain it `
+    + `(${boundsOk}/${ROTS.length})`);
+}
+
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);
 process.exit(fail ? 1 : 0);

@@ -396,6 +396,29 @@ Sample that into a grid, hand it to `SinterForm.surfaceNets`, and it meshes
 watertight. The test suite takes a slot the whole way and checks the mesh
 volume against area × height.
 
+### `shape([height], [opts]) → { profile, node }`
+
+But meshing is a choice, not a requirement. A polygon extrude is a distance
+function like any other, and the kernel has a `profile` primitive that takes
+the outline directly — so a sketch can be raymarched exactly as cheaply as a
+sphere, with nothing sampled, baked or meshed in between.
+
+```js
+const { profile, node } = S.shape(10);
+SinterForm.profiles = [profile];
+SinterForm.sceneSDF([{ id: 0, nodes: [node] }], x, y, z);
+```
+
+Both halves are plain data, which is why this lives here without `sketch.js`
+knowing that `sinterform.js` exists. `opts` takes `tol`, `name`, `fi` (which
+profile slot the node names) and `base` — height runs symmetrically about the
+sketch plane unless `base` is given, in which case material starts there and
+runs `+height`. The loops come back centred on their own bounding box with the
+node moved to match, so the primitive's bounds are tight.
+
+The test suite checks `shape()` against the five-line extrusion above at
+twenty thousand points; they agree to 4e-15 mm.
+
 ## Serialisation
 
 ### `toJSON() → object` · `Sketch.fromJSON(obj) → Sketch`

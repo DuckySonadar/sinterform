@@ -380,6 +380,33 @@ This is the operator the 2D file left to its caller, and it is here because in
 space the direction is not obvious: extruding a tilted face along Z is a shear,
 not an extrusion.
 
+### `shape([face], [height], [opts]) → { profile, node }`
+
+The same solid as something a renderer can raymarch beside a sphere, rather
+than a closure it has to sample onto a grid first. `face` may be a face, an
+index, or omitted for the biggest one.
+
+```js
+const { profile, node } = S.shape(0, 10);
+SinterForm.profiles = [profile];
+SinterForm.sceneSDF([{ id: 0, nodes: [node] }], x, y, z);
+```
+
+This is the 2D file's `shape` one dimension up, and the lift is the point of
+it. In the plane the answer is trivial — the loops are already in XY and the
+rotation is zero. In space the face has a plane of its own, and inverting that
+plane into the `Rz·Ry·Rx` the kernel applies is frame algebra every caller
+would otherwise write again, slightly differently. The columns of that
+rotation *are* the face's `u`, `v` and `normal`, which is what makes it
+invertible; the one case worth naming is a face turned edge on, where `ry` is
+±90° and `rz` and `rx` turn about the same line, so only their sum is
+determined — `rz` is pinned to zero and `rx` carries it.
+
+`opts` is the 2D one's: `tol`, `name`, `fi`, `base`. Pass `base: 0` to get the
+solid `extrude(face, height)` returns, since that one runs material *from* the
+plane rather than about it. The test suite holds the two against each other at
+six orientations, two of them edge on; they agree to 2e-14 mm.
+
 ### Sweeping along one
 
 `sweep.js` takes a path from either sketcher, so a curve solved here is a path

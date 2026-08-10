@@ -1184,6 +1184,49 @@ Sketch.prototype.sdf2d = function (tol) {
   return f;
 };
 
+// The same profile as a *shape*: something a renderer can raymarch beside a
+// sphere, rather than a closure it has to sample onto a grid first.
+//
+// A polygon extrude is not a special case for a sphere tracer -- it is a
+// distance function like any other, and the kernel has a primitive that takes
+// the outline directly. So what a caller needs is not a mesh and not a baked
+// field, but two plain objects: the outline, and a shape record naming it.
+// Both are plain data, which is why this can live here without this file
+// knowing that sinterform.js exists.
+//
+//   const { profile, node } = S.shape(8);
+//   SinterForm.profiles = [profile];
+//   plan = [{ id: 0, nodes: [node] }];
+//
+// `height` runs symmetrically about the sketch plane unless `base` is given,
+// in which case material starts there and runs +height (negative goes the
+// other way). The loops come back centred on their own bounding box and the
+// node moved to match, so the primitive's bounds are tight rather than
+// wherever the sketch happened to be drawn.
+Sketch.prototype.shape = function (height, opts) {
+  opts = opts || {};
+  const h = height === undefined ? 1 : height;
+  const src = this.profile(opts.tol).loops.map(l => l.points);
+  const loops = src.filter(l => l.length >= 3);
+  if (!loops.length) throw new Error('shape wants at least one closed loop');
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const l of loops) for (const p of l) {
+    if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+    if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+  }
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const mid = opts.base === undefined ? 0 : opts.base + h / 2;
+  return {
+    profile: { name: opts.name || 'sketch',
+               loops: loops.map(l => l.map(p => [p[0] - cx, p[1] - cy])) },
+    node: { t: 'profile', on: true, op: 'add', k: 0, b: 0, round: 0,
+            mx: false, my: false, mz: false,
+            p: [cx, cy, mid], r: [0, 0, 0],
+            d: [(x1 - x0) / 2, (y1 - y0) / 2, Math.abs(h) / 2],
+            fi: opts.fi || 0 }
+  };
+};
+
 const CONSTRAINT_KINDS = Object.keys(CONSTRAINTS);
 
 const SinterSketch = { Sketch, CONSTRAINTS, CONSTRAINT_KINDS, KIND,
