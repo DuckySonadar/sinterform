@@ -160,11 +160,15 @@ where `u`, `v` are the first two columns of the rotation. `get` hands back
 
 Every arc is elliptical, so say `circular` when you mean a circle.
 
-> **A full circle has one degree of freedom that changes nothing.** Its frame
-> has three angles and a circle only cares about its normal, which is two — so
-> rotating it in its own plane maps it to itself. Expect one apparent DOF that
-> moves nothing. A partial arc does not have it: `t0` and `t1` are measured
-> from `u`, so turning the frame turns the drawn extent with it.
+> **A circular arc has one degree of freedom that changes nothing.** Turn its
+> frame about its own normal by θ and slide `t0` and `t1` by −θ, and the curve
+> drawn is identical — `rx·cos t·u + ry·sin t·v` with `rx = ry` is a rotation,
+> so the two turns cancel. The solver can walk along that direction forever
+> without moving the picture, and `dof` will read one higher than the shape's
+> real freedom for every circular arc in the sketch.
+>
+> An ellipse does not have it: turning an ellipse's frame turns the ellipse,
+> and no shift of `t` puts it back. `check-sketch3d.mjs` asserts both halves.
 
 ### `nurbs(ctrlPointIds, [{ degree = 3, weights, closed = false }]) → id`
 0 own DOF; the control points carry theirs. Clamped open or periodic closed,
@@ -212,9 +216,15 @@ S.constrain(kind, refA, [refB], [value]) → constraint
 
 `CONSTRAINT_KINDS` is the list of names, for building a UI.
 
-`planar` takes its plane from the first three control points, so it is
-degenerate if those three are collinear. That is the reason it is a constraint
-on a spline rather than a general "these points are coplanar".
+`planar` takes its plane from the first three control points, and each row is
+the **out-of-plane distance in millimetres** of one of the rest — not the area
+ratio it looks like it should be. The difference matters: normalise by
+`|e1||e2|` and a solver can zero every row by making those first three points
+collinear rather than by flattening anything, which it will, because that is
+the cheaper direction. It then reports `converged` with the curve millimetres
+out of plane and the constraint quietly gone. Dividing by `|e1 × e2|` makes
+collapsing the reference triangle cost instead of pay. `check-sketch3d.mjs`
+holds that case down.
 
 ### `addConstraint(kind, a, b, value) → constraint`
 The same thing with nothing inferred: refs taken exactly as given, no contact
@@ -442,7 +452,7 @@ Thrown, not returned:
 node check-sketch3d.mjs
 ```
 
-164 assertions. Every constraint is verified independently after the solve —
+170 assertions. Every constraint is verified independently after the solve —
 measured from the geometry, not by asking the residual that was just
 minimised.
 

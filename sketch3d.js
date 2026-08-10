@@ -300,6 +300,13 @@ Sketch3D.prototype.line = function (a, b, o) {
 //
 // rx == ry is a circular arc; t0/t1 spanning 2pi is a full ellipse. t is the
 // eccentric parameter, not the polar angle.
+//
+// A circular arc carries one degree of freedom that changes nothing: turn the
+// frame about the arc's own normal by theta and slide t0 and t1 by -theta, and
+// the curve drawn is identical, because rx*cos(t)*u + ry*sin(t)*v with rx == ry
+// is a rotation and the two turns cancel. `dof` therefore reads one high for
+// every circular arc in a sketch. An ellipse has no such freedom -- turning an
+// ellipse's frame turns the ellipse.
 Sketch3D.prototype.arc = function (c, rx, ry, rot, t0, t1, o) {
   const f = !!(o && o.fixed);
   const R = rot === undefined || rot === null ? [0, 0, 0]
@@ -696,18 +703,28 @@ const CONSTRAINTS = {
   // control point past the third, since three points always share a plane.
   // Lines and arcs are planar by construction and cost nothing to say it of.
   //
-  // The plane is taken from the first three control points, so it is
-  // degenerate if those three are collinear -- a real limit, and the reason
-  // this is a constraint on a spline rather than a general "these are
-  // coplanar" over arbitrary points.
+  // The plane comes from the first three control points, and the divisor is
+  // what stops that being a trap. Divide by |e1||e2| -- the obvious choice --
+  // and the residual is an area ratio rather than a distance, which a solver
+  // can drive to zero by making e1 and e2 parallel instead of by flattening
+  // anything. It will, too: it is the cheaper direction, and it arrives at
+  // `converged` with the curve millimetres out of plane and the constraint
+  // evaporated, because a degenerate reference triangle satisfies every row
+  // for free.
+  //
+  // Dividing by |e1 x e2| makes each row the honest out-of-plane distance in
+  // millimetres, and collapsing the triangle then costs rather than pays. The
+  // second term keeps the divisor away from zero, so three collinear control
+  // points give a large residual instead of a division by one.
   planar: { n: (S, a) => Math.max(0, planarCount(S, a)),
     f(S, x, c, out) {
     const e = S.ents[c.a.e];
     if (e.k !== KIND.NURBS) return;
     const P = e.base.map(id => S.ptOf(x, id));
     const e1 = sub3(P[1], P[0]), e2 = sub3(P[2], P[0]);
-    const s = (len3(e1) * len3(e2)) || 1e-300;
-    for (let i = 3; i < P.length; i++) out[i - 3] = triple(e1, e2, sub3(P[i], P[0])) / s;
+    const n = cross3(e1, e2);
+    const s = len3(n) + 1e-3 * len3(e1) * len3(e2);
+    for (let i = 3; i < P.length; i++) out[i - 3] = dot3(n, sub3(P[i], P[0])) / s;
   } }
 };
 
@@ -1251,7 +1268,9 @@ function planeOf(poly) {
   const n = newell(poly);
   const area = len3(n);
   if (!(area > 1e-12)) return null;               // degenerate: no plane at all
-  const N = [n[0] / area, n[1] / area, n[2] / area];
+  // + 0 turns a -0 component into 0, so a normal reads [0, 0, 1] rather
+  // than [-0, 0, 1] wherever one of these is shown to a person.
+  const N = [n[0] / area + 0, n[1] / area + 0, n[2] / area + 0];
   let o = [0, 0, 0];
   for (const p of poly) { o[0] += p[0]; o[1] += p[1]; o[2] += p[2]; }
   o = [o[0] / poly.length, o[1] / poly.length, o[2] / poly.length];

@@ -1,0 +1,962 @@
+<!doctype html>
+<!-- SinterSketch3D demonstration — open this file directly, no server needed.
+     Copyright (c) 2026 DuckySonadar · SPDX-License-Identifier: Apache-2.0
+
+     Like viewer.html, this is not part of the kernel and the kernel does not
+     know it exists. It consumes sketch3d.js and sinterform.js the way any
+     application would: build a sketch, drive the solver a step per frame,
+     read the profile back, hand the distance field to surfaceNets. Everything
+     about the machine — camera, projection, shading, the painter's algorithm —
+     is the page's own. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SinterSketch3D — constrained sketching in space</title>
+<style>
+/* One visual world, deliberately: this is a viewport instrument, and every
+   viewport worth using is dark. Ground, panel and ink are stated outright
+   rather than inherited, so the page holds on any host background. */
+:root {
+  --bg:      #0d0f12;   /* the ground, blue-biased near-black */
+  --panel:   #14171c;
+  --sunk:    #090b0e;
+  --line:    #242830;
+  --line-2:  #1a1e25;
+  --dim:     #7d8794;
+  --ink:     #e9edf2;
+  --hot:     #e8974a;   /* the sketch: curves, faces, dimensions */
+  --cool:    #5aa9e6;   /* scaffolding: construction geometry, plane frames */
+  --good:    #6fcf97;
+  --warn:    #e8c34a;
+  --bad:     #ff7b6b;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --serif: "Iowan Old Style", Charter, "Palatino Linotype", Palatino, Georgia, serif;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html { background: var(--bg); }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 13px/1.5 var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+.page { max-width: 1180px; margin: 0 auto; padding: 26px 20px 60px;
+        display: flex; flex-direction: column; gap: 22px; }
+
+/* ---- masthead ---- */
+.mast { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px;
+        border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+.mast h1 { font: 600 15px/1.2 var(--mono); margin: 0; letter-spacing: .06em; }
+.mast h1 b { color: var(--hot); font-weight: 600; }
+.mast p { margin: 0; color: var(--dim); font: 15px/1.4 var(--serif); flex: 1 1 340px;
+          max-width: 62ch; }
+.mast .ver { color: var(--dim); font-size: 11px; letter-spacing: .08em;
+             text-transform: uppercase; }
+
+/* ---- scene tabs: the five things this can show ---- */
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tabs button {
+  background: var(--panel); border: 1px solid var(--line); color: var(--dim);
+  border-radius: 7px; padding: 7px 12px; font: inherit; cursor: pointer;
+  display: flex; align-items: baseline; gap: 8px; transition: border-color .15s, color .15s;
+}
+.tabs button:hover { border-color: #3a4150; color: var(--ink); }
+.tabs button .n { color: #4d5665; font-size: 11px; font-variant-numeric: tabular-nums; }
+.tabs button[aria-pressed="true"] { border-color: var(--hot); color: var(--ink);
+                                    background: #1c1a17; }
+.tabs button[aria-pressed="true"] .n { color: var(--hot); }
+.tabs button:focus-visible, .rail button:focus-visible, input:focus-visible
+  { outline: 2px solid var(--cool); outline-offset: 2px; }
+
+/* ---- the instrument ---- */
+.rig { display: grid; grid-template-columns: minmax(0,1fr) 268px; gap: 14px; }
+.stage { position: relative; background: var(--sunk); border: 1px solid var(--line);
+         border-radius: 10px; overflow: hidden; min-height: 460px; }
+#view { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+#view:active { cursor: grabbing; }
+.stage .corner { position: absolute; bottom: 9px; left: 12px; color: #4d5665;
+                 font-size: 11px; letter-spacing: .05em; pointer-events: none; }
+.stage .live { position: absolute; top: 10px; left: 12px; font-size: 11px;
+               color: var(--dim); pointer-events: none; font-variant-numeric: tabular-nums; }
+.stage .live b { color: var(--hot); font-weight: 400; }
+
+.rail { display: flex; flex-direction: column; gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+        padding: 12px; display: flex; flex-direction: column; gap: 9px; }
+.lbl { color: var(--dim); font-size: 10.5px; text-transform: uppercase;
+       letter-spacing: .1em; }
+
+/* the solve report — the thing that makes this a sketcher and not a viewer */
+.dof { display: flex; align-items: baseline; gap: 9px; }
+.dof .num { font-size: 30px; line-height: 1; font-variant-numeric: tabular-nums;
+            color: var(--hot); }
+.dof .num.zero { color: var(--good); }
+.dof .num.bad { color: var(--bad); }
+.dof .cap { color: var(--dim); font-size: 11px; max-width: 15ch; }
+.rows { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px;
+        font-size: 12px; font-variant-numeric: tabular-nums; }
+.rows span:nth-child(odd) { color: var(--dim); }
+.rows span:nth-child(even) { text-align: right; }
+.rows .em { color: var(--ink); }
+.pill { align-self: flex-start; border-radius: 999px; padding: 2px 9px; font-size: 11px;
+        border: 1px solid; letter-spacing: .04em; }
+.pill.ok { color: var(--good); border-color: #2c4c3a; background: #131c17; }
+.pill.no { color: var(--bad); border-color: #4c2c2c; background: #1c1313; }
+.pill.run { color: var(--warn); border-color: #4c452c; background: #1c1a13; }
+
+.ctl { display: flex; flex-direction: column; gap: 5px; }
+.ctl .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ctl .val { color: var(--hot); font-size: 12px; font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; accent-color: var(--hot); background: transparent; }
+.toggle { display: flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.toggle button { flex: 1; background: transparent; border: 0; color: var(--dim);
+                 padding: 6px 4px; font: inherit; cursor: pointer; }
+.toggle button[aria-pressed="true"] { background: var(--hot); color: #14171c; }
+.toggle button.cool[aria-pressed="true"] { background: var(--cool); }
+.act { background: transparent; border: 1px solid var(--line); color: var(--ink);
+       border-radius: 7px; padding: 7px; font: inherit; cursor: pointer; }
+.act:hover { border-color: var(--hot); color: var(--hot); }
+
+.legend { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px;
+          color: var(--dim); }
+.legend i { display: inline-block; width: 16px; height: 0; border-top: 2px solid;
+            vertical-align: middle; margin-right: 7px; }
+
+/* ---- the scene's own words, and the code that made it ---- */
+.read { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.15fr); gap: 18px;
+        align-items: start; }
+.blurb h2 { font: 500 14px/1.3 var(--mono); margin: 0 0 8px; letter-spacing: .04em;
+            color: var(--hot); text-wrap: balance; }
+.blurb p { font: 15.5px/1.62 var(--serif); color: #c3ccd6; margin: 0 0 10px; max-width: 60ch; }
+.blurb p:last-child { margin-bottom: 0; }
+.blurb code { font: 12.5px var(--mono); color: var(--ink); background: #191d24;
+              border: 1px solid var(--line-2); border-radius: 4px; padding: .5px 4px; }
+.src { background: var(--sunk); border: 1px solid var(--line); border-radius: 10px; }
+.src .bar { display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--dim);
+            font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; }
+.src pre { margin: 0; padding: 12px; overflow-x: auto; font: 12px/1.62 var(--mono);
+           color: #b9c4d0; }
+.src .k { color: var(--cool); }
+.src .s { color: var(--hot); }
+.src .c { color: #5b6472; font-style: italic; }
+.src .n { color: #b98cd9; }
+
+/* ---- the four things that change ---- */
+.facts { border-top: 1px solid var(--line); padding-top: 20px;
+         display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+.fact h3 { font: 500 12.5px/1.3 var(--mono); margin: 0 0 6px; color: var(--ink);
+           letter-spacing: .03em; }
+.fact h3 span { color: var(--hot); }
+.fact p { font: 14.5px/1.55 var(--serif); color: #a8b2bd; margin: 0; max-width: 46ch; }
+table.cost { border-collapse: collapse; font-size: 11.5px; margin-top: 8px;
+             font-variant-numeric: tabular-nums; }
+table.cost th, table.cost td { text-align: right; padding: 2px 0 2px 14px; color: var(--dim); }
+table.cost th:first-child, table.cost td:first-child { text-align: left; padding-left: 0;
+                                                       color: #a8b2bd; }
+table.cost thead th { color: #4d5665; font-weight: 400; border-bottom: 1px solid var(--line); }
+table.cost td.hi { color: var(--hot); }
+
+footer { border-top: 1px solid var(--line); padding-top: 14px; color: #5b6472;
+         font-size: 11.5px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+footer b { color: var(--dim); font-weight: 400; }
+
+@media (max-width: 900px) {
+  .rig { grid-template-columns: 1fr; }
+  .stage { min-height: 58vh; }
+  .read { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="mast">
+    <h1><b>SinterSketch3D</b> · sketch3d.js</h1>
+    <p>A constrained sketcher one dimension up. Everything here is drawn roughly,
+       then solved — watch the residual fall on load, then orbit it.</p>
+    <div class="ver">mm · radians · +Z up</div>
+  </header>
+
+  <nav class="tabs" id="tabs" aria-label="Scenes"></nav>
+
+  <div class="rig">
+    <div class="stage">
+      <canvas id="view"></canvas>
+      <div class="live" id="live"></div>
+      <div class="corner">drag to orbit · scroll to zoom</div>
+    </div>
+
+    <div class="rail">
+      <div class="card">
+        <div class="lbl">Solve report</div>
+        <div class="dof"><span class="num" id="dofn">—</span>
+          <span class="cap" id="dofc">degrees of freedom left</span></div>
+        <div class="rows" id="report"></div>
+        <span class="pill" id="pill"></span>
+      </div>
+      <div class="card" id="ctls"><div class="lbl">Controls</div></div>
+      <div class="card legend">
+        <div class="lbl" style="margin-bottom:2px">What you are looking at</div>
+        <div><i style="border-color:#e8974a"></i>sketch geometry</div>
+        <div><i style="border-color:#5aa9e6;border-top-style:dashed"></i>construction</div>
+        <div><i style="border-color:#8b96a4"></i>meshed solid, via surfaceNets</div>
+      </div>
+    </div>
+  </div>
+
+  <section class="read">
+    <div class="blurb" id="blurb"></div>
+    <div class="src">
+      <div class="bar"><span id="srcname">the sketch</span><span>the code that just ran</span></div>
+      <pre id="src"></pre>
+    </div>
+  </section>
+
+  <section class="facts">
+    <div class="fact">
+      <h3><span>01</span> &nbsp;Rows are not equations</h3>
+      <p>In the plane, <em>parallel</em> is one scalar. In space the cross product is
+         a vector: three rows that can only ever have rank two, because two directions
+         differ by two angles. Each constraint declares the rank it carries, so
+         <em>redundant</em> still means what it meant.</p>
+      <table class="cost">
+        <thead><tr><th>constraint</th><th>rows</th><th>equations</th></tr></thead>
+        <tbody>
+          <tr><td>parallel</td><td>3</td><td class="hi">2</td></tr>
+          <tr><td>collinear</td><td>6</td><td class="hi">4</td></tr>
+          <tr><td>tangent</td><td>6</td><td class="hi">5</td></tr>
+          <tr><td>perpendicular</td><td>1</td><td class="hi">1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="fact">
+      <h3><span>02</span> &nbsp;An arc carries a frame</h3>
+      <p>One angle became three, so an arc owns seven numbers rather than five. Pass a
+         bare number for the rotation and it means about +Z alone — which is exactly the
+         2D <em>phi</em>, so a planar sketch lifts across unchanged.</p>
+      <p>A circular arc keeps one freedom that changes nothing: turn its frame about its
+         own normal and slide both extents back, and the curve drawn is the one that was
+         there. Expect a <em>dof</em> one higher than the shape's.</p>
+    </div>
+    <div class="fact">
+      <h3><span>03</span> &nbsp;Angles are unsigned</h3>
+      <p>A signed angle needs an axis to be signed about, and space does not supply one.
+         Angles run 0 to π. At either end the unsigned angle has a kink — say
+         <em>parallel</em> or <em>perpendicular</em> there, which is what you meant.</p>
+    </div>
+    <div class="fact">
+      <h3><span>04</span> &nbsp;A closed loop bounds nothing</h3>
+      <p>Not unless it is flat, and closing it does not make it flat. So planarity is
+         measured, faces come with the plane they were found in, and an extrusion runs
+         along the face's own normal — along Z would be a shear. A wireframe bounds no
+         volume at all, which is why <em>wire</em> asks for a radius.</p>
+    </div>
+  </section>
+
+  <footer>
+    <span><b>sketch3d.js</b> — no DOM, no GL, no dependencies. This page consumes it
+      the way any application would.</span>
+    <span><b>Apache-2.0</b> · SinterForm</span>
+  </footer>
+</div>
+
+<script src="sinterform.js"></script>
+<script src="sketch3d.js"></script>
+<script>
+"use strict";
+(function () {
+const SK = SinterSketch3D, SF = SinterForm;
+const $ = (id) => document.getElementById(id);
+const TAU = Math.PI * 2;
+
+// ======================================================================
+// the scenes — each one is a sketch, built rough and solved
+// ======================================================================
+// `build` is shown verbatim under the viewport, so it is kept to the sketch
+// and nothing else: no colours, no camera, no rendering.
+const SCENES = [{
+  name: 'slot', view: { yaw: -0.95, pitch: 0.48 }, tag: 'a profile, closed',
+  title: 'Four curves are not a profile until their ends say so',
+  blurb: [
+    `The slot is drawn roughly — the right-hand end is 5 mm off the plate and the
+     sides run past where they should stop. Nothing about that drawing says which
+     end joins which, and a sketcher that guessed from proximity would be guessing.`,
+    `So the joints are stated: <code>coincident</code> between two <code>{e, end}</code>
+     refs to make the ends meet, and <code>parallel</code> between the same two to make
+     them meet smoothly. Tangency at a shared end is just parallel directions there —
+     no extra unknowns, no branch to pick.`,
+    `Watch the report: <code>redundant</code> settles above zero, because in a plane a
+     <code>parallel</code> says one thing rather than two — the other was already said by
+     holding the arcs flat. Converged with leftovers is agreement, not conflict.`],
+  controls: [
+    { k: 'length', label: 'Centre distance', min: 24, max: 56, step: 1, value: 38, unit: 'mm' },
+    { k: 'thick', label: 'Extrude', min: 0, max: 20, step: 1, value: 10, unit: 'mm' }],
+  build: function (S, o) {
+    const R = 8, L = o.length;
+    const c0 = S.point(0, 0, 0, { fixed: true });   // one end pinned to the origin
+    const c1 = S.point(L * 0.8, 5, 4);              // the other, roughly where it goes
+    const arcL = S.arc(c0, R, R, 0, Math.PI / 2, 3 * Math.PI / 2);
+    const arcR = S.arc(c1, R, R, 0, -Math.PI / 2, Math.PI / 2);
+    const top = S.line(S.point(1, R + 3, 2), S.point(L, R + 2, -1));
+    const bot = S.line(S.point(L, -R - 3, 1), S.point(-2, -R, 0));
+
+    // a joint is two statements: the ends meet, and they meet smoothly
+    const joint = (a, ae, b, be) => {
+      S.constrain('coincident', { e: a, end: ae }, { e: b, end: be });
+      S.constrain('parallel', { e: a, end: ae }, { e: b, end: be });
+    };
+    joint(arcL, 1, bot, 1); joint(bot, 0, arcR, 0);
+    joint(arcR, 1, top, 1); joint(top, 0, arcL, 0);
+
+    // both ends are circles of one radius
+    for (const a of [arcL, arcR]) {
+      S.constrain('circular', a);
+      S.constrain('radius', a, undefined, R);
+    }
+    // and the whole thing lies in the build plate: two tangents a quarter turn
+    // apart hold each arc's plane, at contact parameters we pin ourselves
+    for (const a of [arcL, arcR])
+      for (const t of [Math.PI / 2, Math.PI])
+        S.constrain('horizontal', { e: a, t: S.param(t, { fixed: true }) });
+
+    const spine = S.line(c0, c1, { construction: true });
+    S.constrain('horizontal', { e: spine });
+    S.constrain('distance', { p: c0 }, { p: c1 }, L);
+    return { extrude: o.thick };
+  }
+}, {
+  name: 'bracket', view: { yaw: -0.72, pitch: 0.44 }, tag: 'a face knows its plane',
+  title: 'An extrusion runs along the face, not along Z',
+  blurb: [
+    `The plate is drawn in a plane tilted out of the world axes, and the bore is drawn
+     nowhere near it — wrong place, wrong size, wrong plane. Three constraints put it
+     right: <code>centre</code> onto a construction diagonal, and two direction
+     constraints tying its tangents to the plate's edges, which is how you say
+     "the same plane" without a plane entity.`,
+    `<code>profile()</code> then finds the plane itself — Newell's normal over the loop,
+     with the deviation measured rather than assumed — and hands back the face with an
+     orthonormal basis in it.`,
+    `Switch the extrusion to <b>along Z</b> and the reason <code>extrude</code> exists
+     becomes visible: same profile, same height, and the result is a shear. In the plane
+     nobody has to think about this, because there is only one direction to go.`],
+  controls: [
+    { k: 'bore', label: 'Bore radius', min: 3, max: 10, step: .5, value: 7, unit: 'mm' },
+    { k: 'along', label: 'Extrude', type: 'toggle',
+      options: [['n', 'along the normal'], ['z', 'along Z']], value: 'n' }],
+  build: function (S, o) {
+    const rot = [0.35, -0.5, 0.8], W = 46, H = 26;      // the plate's own plane
+    const F = SK.frameOf(rot[0], rot[1], rot[2]), u = F[0], v = F[1];
+    const at = (a, b) => S.point(u[0] * a + v[0] * b, u[1] * a + v[1] * b,
+                                 u[2] * a + v[2] * b);
+    const c = [at(0, 0), at(W, 0), at(W, H), at(0, H)];
+    c.forEach(p => S.fix(p));
+    const e = [S.line(c[0], c[1]), S.line(c[1], c[2]),
+               S.line(c[2], c[3]), S.line(c[3], c[0])];
+    const diag = S.line(c[0], c[2], { construction: true });
+
+    // the bore, drawn wrong and told where to be
+    const hc = S.point(14, 2, 26);
+    const hole = S.arc(hc, 5, 3, [0.2, 0.1, 0.4], 0, TAU);
+    S.constrain('circular', hole);
+    S.constrain('radius', hole, undefined, o.bore);
+    S.constrain('centre', { p: hc }, { e: diag });     // the middle of the plate
+
+    // its plane is the plate's: two of its tangents run along two edges
+    S.constrain('parallel', { e: hole, t: S.param(0, { fixed: true }) }, { e: e[1] });
+    S.constrain('parallel', { e: hole, t: S.param(Math.PI / 2, { fixed: true }) }, { e: e[0] });
+    return { extrude: 8, shear: o.along === 'z' };
+  }
+}, {
+  name: 'tangency', view: { yaw: -1.74, pitch: 0.42 }, tag: 'a spare dimension',
+  title: 'Tangency in space does not fix the centre distance',
+  blurb: [
+    `A fixed circle of radius 14, a free circle of radius 9, and one
+     <code>tangent</code> between them. It converges: the contact points coincide to
+     1e-12 and the tangents there are in line.`,
+    `And the centres are not 23 mm apart. The second circle is free to tilt about the
+     tangent it shares, so it does, and the answer is correct for the question that was
+     asked. This is not a solver defect — it is what one more dimension costs, and the
+     test suite asserts both halves of it.`,
+    `Say which plane it is in — two tangents held horizontal — and 23.000 comes back
+     exactly. <em>Hold it flat</em> re-solves from where the sketch already is, one
+     Levenberg–Marquardt step per frame, which is the loop the library hands you rather
+     than one it runs.`],
+  controls: [
+    { k: 'flat', label: 'The free circle', type: 'toggle',
+      options: [['free', 'free in space'], ['flat', 'held flat']], value: 'free' }],
+  readout: 'centres', fill: false,
+  build: function (S, o) {
+    const c0 = S.point(0, 0, 0, { fixed: true });
+    const A = S.arc(c0, 14, 14, 0, 0, TAU);
+    S.fix(A);
+    const c1 = S.point(46, 4, 6);                       // roughly over there
+    const B = S.arc(c1, 9, 5, [0.5, 0.3, 0], 0, TAU);
+    S.constrain('circular', B);
+    S.constrain('radius', B, undefined, 9);
+    S.constrain('tangent', { e: A }, { e: B });
+
+    if (o.flat === 'flat')                              // name the plane it is in
+      for (const t of [Math.PI / 2, Math.PI])
+        S.constrain('horizontal', { e: B, t: S.param(t, { fixed: true }) });
+    return { measure: [c0, c1] };
+  }
+}, {
+  name: 'spline', view: { yaw: -1.02, pitch: 0.17 }, tag: 'flat is not free',
+  title: 'A closed loop is not a face until it is flat',
+  blurb: [
+    `A closed periodic NURBS through six control points in space. Its two ends are the
+     same point, so the coincidence walk closes it on the first try — and
+     <code>profile()</code> still returns no faces, because a loop in space bounds an
+     area only if it lies in a plane. It reports <code>nonplanar: 1</code> rather than
+     flattening it and hoping.`,
+    `<code>planar</code> is the constraint that fixes that: one equation per control
+     point past the third, since three points always share a plane. Turn it on and the
+     curve folds into a plane it chooses for itself — no plane was named — and the
+     deviation of the whole sampled curve, not just the control points, goes to zero.`,
+    `Then it is a face, with an area and a normal, and everything downstream works.`],
+  controls: [
+    { k: 'planar', label: 'The spline', type: 'toggle',
+      options: [['free', 'free in space'], ['planar', 'planar']], value: 'free' },
+    { k: 'thick', label: 'Extrude', min: 0, max: 16, step: 1, value: 0, unit: 'mm' }],
+  readout: 'flatness',
+  build: function (S, o) {
+    const P = [[0, 0, 0], [30, 20, 16], [56, -6, -12],
+               [74, 22, 18], [48, 44, -8], [8, 36, 12]];
+    const c = P.map(p => S.point(p[0], p[1], p[2]));
+    S.fix(c[0]);
+    for (let i = 0; i < c.length; i++)                          // the control polygon,
+      S.line(c[i], c[(i + 1) % c.length], { construction: true }); // as scaffolding
+    const nb = S.nurbs(c, { degree: 3, closed: true });
+    S.constrain('distance', { p: c[0] }, { p: c[3] }, 80);      // two dimensions,
+    S.constrain('distance', { p: c[1] }, { p: c[4] }, 42);      // to give it a size
+    if (o.planar === 'planar') S.constrain('planar', nb);
+    return { extrude: o.thick, curve: nb };
+  }
+}, {
+  name: 'wire', view: { yaw: -0.58, pitch: 0.40 }, tag: 'a solid with a radius',
+  title: 'A wireframe is a solid once you give it a thickness',
+  blurb: [
+    `Line, arc, line. The first joint is tangent — <code>coincident</code> and
+     <code>parallel</code> between the same two ends — and the second is a plain corner,
+     so the last leg climbs out of the plate. As a sketch, this bounds nothing at all.`,
+    `<code>wire(radius)</code> is the honest solid it stands for: the distance to the
+     drawn curves, less a radius. It is a true distance and 1-Lipschitz, so a raymarcher
+     can step it, and <code>surfaceNets</code> meshes it watertight — which is what you
+     are looking at.`,
+    `Construction geometry is left out of it, the same way it is left out of a profile.`],
+  controls: [
+    { k: 'radius', label: 'Wire radius', min: 1, max: 8, step: .5, value: 4, unit: 'mm' }],
+  build: function (S, o) {
+    const a = S.point(-30, -20, 2, { fixed: true });
+    const b = S.point(4, -14, -3);                       // all drawn roughly
+    const l1 = S.line(a, b);
+    const cc = S.point(4, 2, 1);
+    const el = S.arc(cc, 15, 11, [0.2, 0.1, 0], -Math.PI / 2, Math.PI / 2);
+    const l2 = S.line(S.point(3, 20, 1), S.point(-14, 22, 18));
+
+    S.constrain('coincident', { e: l1, end: 1 }, { e: el, end: 0 });
+    S.constrain('parallel', { e: l1, end: 1 }, { e: el, end: 0 });
+    S.constrain('coincident', { e: el, end: 1 }, { e: l2, end: 0 });   // a corner
+
+    S.constrain('circular', el);
+    S.constrain('radius', el, undefined, 18);
+    S.constrain('horizontal', { e: l1 });
+    S.constrain('distance', { p: a }, { p: b }, 34);
+    for (const t of [0, Math.PI / 2])
+      S.constrain('horizontal', { e: el, t: S.param(t, { fixed: true }) });
+    return { wire: o.radius };
+  }
+}];
+
+// ======================================================================
+// the camera — a plain look-at, +Z up because the kernel says so
+// ======================================================================
+const cam = { yaw: -0.62, pitch: 0.52, dist: 150, target: [14, 4, 4], auto: true };
+const V = { eye: [0, 0, 0], fwd: [0, 0, 0], right: [0, 0, 0], up: [0, 0, 0], f: 1 };
+const cv = $('view'), ctx = cv.getContext('2d');
+let W = 1, H = 1, DPR = 1;
+
+function updateCam() {
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const d = [cp * Math.cos(cam.yaw), cp * Math.sin(cam.yaw), sp];
+  V.eye = [cam.target[0] + d[0] * cam.dist, cam.target[1] + d[1] * cam.dist,
+           cam.target[2] + d[2] * cam.dist];
+  V.fwd = [-d[0], -d[1], -d[2]];
+  // right = normalize(fwd x world-up), up = right x fwd
+  const r = [V.fwd[1], -V.fwd[0], 0];
+  const rl = Math.hypot(r[0], r[1]) || 1;
+  V.right = [r[0] / rl, r[1] / rl, 0];
+  V.up = [V.right[1] * V.fwd[2] - V.right[2] * V.fwd[1],
+          V.right[2] * V.fwd[0] - V.right[0] * V.fwd[2],
+          V.right[0] * V.fwd[1] - V.right[1] * V.fwd[0]];
+  V.f = Math.min(W, H) * 1.15;
+}
+
+const px = new Float64Array(3);
+function project(p) {
+  const dx = p[0] - V.eye[0], dy = p[1] - V.eye[1], dz = p[2] - V.eye[2];
+  const z = dx * V.fwd[0] + dy * V.fwd[1] + dz * V.fwd[2];
+  if (z < 4) return null;
+  const s = V.f / z;
+  px[0] = W / 2 + (dx * V.right[0] + dy * V.right[1] + dz * V.right[2]) * s;
+  px[1] = H / 2 - (dx * V.up[0] + dy * V.up[1] + dz * V.up[2]) * s;
+  px[2] = z;
+  return px;
+}
+
+// ======================================================================
+// state
+// ======================================================================
+let scene = SCENES[0], opts = {}, S = null, run = null, marks = {};
+let solving = false, report = null, live = '', mesh = null, meshInfo = '';
+let faces = null, curves = [], readout = '';
+
+function optsFor(sc) {
+  const o = {};
+  for (const c of sc.controls || []) o[c.k] = c.value;
+  return o;
+}
+
+function rebuild() {
+  S = new SK.Sketch3D();
+  marks = scene.build(S, opts) || {};
+  run = S.solver();
+  solving = true;
+  report = null; mesh = null; faces = null; meshInfo = '';
+  sampleCurves();
+  paintReport();
+}
+
+// Curves come straight out of sample(); this is redrawn every frame while the
+// sketch is settling, which is the point of a solver you drive yourself.
+function sampleCurves() {
+  curves = [];
+  for (const e of S.entities()) {
+    if (e.kind !== 'line' && e.kind !== 'arc' && e.kind !== 'nurbs') continue;
+    curves.push({ pts: S.sample(e.id, 0.08), con: !!e.construction });
+  }
+}
+
+// A shear along Z, for the bracket's comparison. Deliberately not `extrude`:
+// it slides the face along Z instead of along its normal, which is the mistake
+// being drawn.
+function shearZ(face, height) {
+  const polys = face.loops.map(l => l.uv);
+  const o = face.origin, U = face.u, Vv = face.v, N = face.normal;
+  const f = (x, y, z) => {
+    const t = ((x - o[0]) * N[0] + (y - o[1]) * N[1] + (z - o[2]) * N[2]) / N[2];
+    const wx = x - o[0], wy = y - o[1], wz = z - o[2] - t;
+    const a = SK.polygonSDF(polys, wx * U[0] + wy * U[1] + wz * U[2],
+                                   wx * Vv[0] + wy * Vv[1] + wz * Vv[2]);
+    const b = Math.abs(t - height / 2) - Math.abs(height) / 2;
+    return Math.min(Math.max(a, b), 0) + Math.hypot(Math.max(a, 0), Math.max(b, 0));
+  };
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  for (const l of face.loops) for (const p of l.points) for (const s of [0, height])
+    for (let i = 0; i < 3; i++) {
+      const c = p[i] + (i === 2 ? s : 0);
+      if (c < lo[i]) lo[i] = c;
+      if (c > hi[i]) hi[i] = c;
+    }
+  f.bounds = { lo, hi };
+  return f;
+}
+
+// Sample a distance field into a grid and mesh it. Straight surfaceNets, the
+// same call an exporter would make.
+function meshOf(f, res) {
+  if (!f || !f.bounds) return null;
+  const pad = 2 * res;
+  const lo = f.bounds.lo.map(v => v - pad), hi = f.bounds.hi.map(v => v + pad);
+  const n = [0, 1, 2].map(i => Math.ceil((hi[i] - lo[i]) / res) + 1);
+  if (n[0] * n[1] * n[2] > 1.4e6) return null;
+  const vol = new Float32Array(n[0] * n[1] * n[2]);
+  let k = 0;
+  for (let i = 0; i < n[0]; i++)
+    for (let j = 0; j < n[1]; j++)
+      for (let l = 0; l < n[2]; l++)
+        vol[k++] = f(lo[0] + i * res, lo[1] + j * res, lo[2] + l * res);
+  return SF.surfaceNets(vol, n[0], n[1], n[2], lo[0], lo[1], lo[2], res);
+}
+
+// Precompute each triangle's shade once: the normal is fixed in world space, so
+// only the depth sort has to happen per frame.
+const LIGHT = (() => { const l = [0.36, -0.62, 0.7];
+  const m = Math.hypot(l[0], l[1], l[2]); return l.map(v => v / m); })();
+
+function prepare(raw) {
+  const P = raw.positions, I = raw.indices, nt = I.length / 3;
+  const tri = new Uint32Array(I);
+  const shade = new Uint8Array(nt), nrm = new Float32Array(nt * 3);
+  const cen = new Float32Array(nt * 3);
+  for (let t = 0; t < nt; t++) {
+    const a = 3 * I[3 * t], b = 3 * I[3 * t + 1], c = 3 * I[3 * t + 2];
+    const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
+    const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const m = Math.hypot(nx, ny, nz) || 1;
+    nx /= m; ny /= m; nz /= m;
+    nrm[3 * t] = nx; nrm[3 * t + 1] = ny; nrm[3 * t + 2] = nz;
+    cen[3 * t] = (P[a] + P[b] + P[c]) / 3;
+    cen[3 * t + 1] = (P[a + 1] + P[b + 1] + P[c + 1]) / 3;
+    cen[3 * t + 2] = (P[a + 2] + P[b + 2] + P[c + 2]) / 3;
+    const lam = Math.abs(nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+    shade[t] = Math.max(0, Math.min(23, Math.round(lam * 23)));
+  }
+  return { P, tri, nt, shade, nrm, cen, order: new Uint32Array(nt), depth: new Float32Array(nt) };
+}
+// 24 steps from shadow to lit — a cool grey, so the sketch keeps the accent
+const RAMP = Array.from({ length: 24 }, (_, i) => {
+  const t = i / 23;
+  const r = Math.round(28 + t * 168), g = Math.round(33 + t * 176), b = Math.round(41 + t * 186);
+  return `rgb(${r},${g},${b})`;
+});
+
+// Put the camera where the sketch is. Only on a scene change -- re-framing
+// while someone drags a slider would fight them for the view.
+let needFrame = true;
+function frameScene() {
+  const b = S.bounds(0.5);
+  if (!b) return;
+  cam.target = [0, 1, 2].map(i => (b.lo[i] + b.hi[i]) / 2);
+  const span = Math.max(...[0, 1, 2].map(i => b.hi[i] - b.lo[i]));
+  cam.dist = Math.max(62, span * 1.55);
+  if (scene.view) { cam.yaw = scene.view.yaw; cam.pitch = scene.view.pitch; }
+}
+
+function recompute() {
+  faces = null; mesh = null; meshInfo = '';
+  if (needFrame) { frameScene(); needFrame = false; }
+  let prof = null;
+  try { prof = S.profile(0.08); } catch (err) { prof = null; }
+  if (prof) faces = prof;
+  const t0 = performance.now();
+  let field = null, res = 0.9;
+  if (marks.wire) { field = S.wire(marks.wire, 0.25); res = Math.max(0.7, marks.wire / 4.5); }
+  else if (prof && prof.faces.length && marks.extrude > 0)
+    field = marks.shear ? shearZ(prof.faces[0], marks.extrude)
+                        : S.extrude(prof.faces[0], marks.extrude);
+  if (field) {
+    const raw = meshOf(field, res);
+    if (raw && raw.indices.length) {
+      mesh = prepare(raw);
+      meshInfo = `${(raw.indices.length / 3).toLocaleString()} triangles · `
+               + `${Math.round(performance.now() - t0)} ms @ ${res.toFixed(1)} mm`;
+    }
+  }
+  readout = measure(prof);
+}
+
+function measure(prof) {
+  if (scene.readout === 'centres' && marks.measure) {
+    const a = S.get(marks.measure[0]), b = S.get(marks.measure[1]);
+    return `centre distance ${Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z).toFixed(3)} mm`
+         + ` · off the plate ${Math.abs(b.z).toFixed(3)} mm`;
+  }
+  if (scene.readout === 'flatness' && marks.curve !== undefined) {
+    const pl = SK.planeOf(S.sample(marks.curve, 0.05));
+    return `out of plane by ${pl ? pl.deviation.toFixed(3) : '—'} mm`;
+  }
+  if (prof && prof.faces.length)
+    return `face area ${prof.faces[0].area.toFixed(2)} mm²`;
+  if (prof && prof.nonplanar)
+    return `${prof.nonplanar} closed loop${prof.nonplanar === 1 ? '' : 's'}, none of them flat`;
+  return '';
+}
+
+// ======================================================================
+// drawing
+// ======================================================================
+function grid() {
+  const N = 6, step = 12;
+  ctx.lineWidth = 1;
+  for (let i = -N; i <= N; i++) {
+    for (const axis of [0, 1]) {
+      const a = axis ? [-N * step, i * step, 0] : [i * step, -N * step, 0];
+      const b = axis ? [N * step, i * step, 0] : [i * step, N * step, 0];
+      const p = project(a); if (!p) continue;
+      const x0 = p[0], y0 = p[1];
+      const q = project(b); if (!q) continue;
+      ctx.strokeStyle = i === 0 ? '#2b323d' : '#191d24';
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(q[0], q[1]); ctx.stroke();
+    }
+  }
+}
+
+function drawMesh(m) {
+  const nt = m.nt, ord = m.order;
+  let k = 0;
+  for (let t = 0; t < nt; t++) {
+    const cx = m.cen[3 * t] - V.eye[0], cy = m.cen[3 * t + 1] - V.eye[1],
+          cz = m.cen[3 * t + 2] - V.eye[2];
+    if (m.nrm[3 * t] * cx + m.nrm[3 * t + 1] * cy + m.nrm[3 * t + 2] * cz > 0) continue;
+    const d = cx * V.fwd[0] + cy * V.fwd[1] + cz * V.fwd[2];
+    if (d < 4) continue;
+    ord[k] = t; k++;
+  }
+  // painter's algorithm: farthest first. Surface-nets triangles are small
+  // enough that sorting by centroid is honest.
+  const idx = Array.from(ord.subarray(0, k));
+  idx.sort((a, b) => depthOf(m, b) - depthOf(m, a));
+  const P = m.P, I = m.tri;
+  for (let i = 0; i < idx.length; i++) {
+    const t = idx[i];
+    const a = 3 * I[3 * t], b = 3 * I[3 * t + 1], c = 3 * I[3 * t + 2];
+    const p0 = project([P[a], P[a + 1], P[a + 2]]); if (!p0) continue;
+    const x0 = p0[0], y0 = p0[1];
+    const p1 = project([P[b], P[b + 1], P[b + 2]]); if (!p1) continue;
+    const x1 = p1[0], y1 = p1[1];
+    const p2 = project([P[c], P[c + 1], P[c + 2]]); if (!p2) continue;
+    ctx.fillStyle = RAMP[m.shade[t]];
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(p2[0], p2[1]);
+    ctx.closePath(); ctx.fill();
+  }
+}
+function depthOf(m, t) {
+  return (m.cen[3 * t] - V.eye[0]) * V.fwd[0] + (m.cen[3 * t + 1] - V.eye[1]) * V.fwd[1]
+       + (m.cen[3 * t + 2] - V.eye[2]) * V.fwd[2];
+}
+
+function drawFaces() {
+  if (!faces || mesh || scene.fill === false) return;
+  for (const f of faces.faces) {
+    ctx.beginPath();
+    for (const l of f.loops) {
+      let first = true;
+      for (const p of l.points) {
+        const q = project(p); if (!q) { first = true; continue; }
+        if (first) { ctx.moveTo(q[0], q[1]); first = false; } else ctx.lineTo(q[0], q[1]);
+      }
+      ctx.closePath();
+    }
+    ctx.fillStyle = 'rgba(232,151,74,0.13)';
+    ctx.fill('evenodd');
+  }
+}
+
+function drawCurves() {
+  for (const c of curves) {
+    ctx.strokeStyle = c.con ? '#5aa9e6' : '#e8974a';
+    ctx.lineWidth = c.con ? 1 : 1.75;
+    ctx.setLineDash(c.con ? [4, 4] : []);
+    ctx.beginPath();
+    let first = true;
+    for (const p of c.pts) {
+      const q = project(p);
+      if (!q) { first = true; continue; }
+      if (first) { ctx.moveTo(q[0], q[1]); first = false; } else ctx.lineTo(q[0], q[1]);
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // the points a sketch is actually made of
+  ctx.fillStyle = '#f0b478';
+  for (const e of S.entities('point')) {
+    const q = project([e.x, e.y, e.z]); if (!q) continue;
+    ctx.fillRect(q[0] - 2, q[1] - 2, 4, 4);
+  }
+}
+
+function draw() {
+  updateCam();
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#090b0e'; ctx.fillRect(0, 0, W, H);
+  grid();
+  if (mesh) drawMesh(mesh);
+  drawFaces();
+  drawCurves();
+  $('live').innerHTML = live;
+}
+
+// ======================================================================
+// the loop — one Levenberg-Marquardt step per frame while it is settling
+// ======================================================================
+function frame() {
+  if (solving) {
+    const st = run.step();
+    live = `solving · iteration <b>${st.iteration}</b> · residual `
+         + `<b>${st.residual.toExponential(2)}</b>`;
+    sampleCurves();
+    if (st.done) {
+      solving = false;
+      report = run.report();
+      recompute();
+      paintReport();
+    }
+  } else {
+    live = [meshInfo, readout].filter(Boolean).join(' · ');
+  }
+  if (cam.auto && !prefersStill) cam.yaw += 0.0022;
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// ======================================================================
+// the panels
+// ======================================================================
+function paintReport() {
+  const r = report;
+  const n = $('dofn'), pill = $('pill');
+  if (!r) {
+    n.textContent = '·'; n.className = 'num';
+    $('dofc').textContent = 'solving';
+    $('report').innerHTML = '';
+    pill.className = 'pill run'; pill.textContent = 'settling';
+    return;
+  }
+  n.textContent = r.dof;
+  n.className = 'num' + (r.dof === 0 ? ' zero' : '') + (r.conflicting ? ' bad' : '');
+  $('dofc').textContent = r.dof === 0 ? 'fully constrained'
+    : 'degree' + (r.dof === 1 ? '' : 's') + ' of freedom left';
+  const rows = [
+    ['variables', r.variables], ['equations', r.equations], ['residual rows', r.rows],
+    ['rank', r.rank], ['redundant', r.redundant], ['iterations', r.iterations]];
+  $('report').innerHTML = rows.map(([k, v]) =>
+    `<span>${k}</span><span class="em">${v}</span>`).join('');
+  pill.className = 'pill ' + (r.conflicting ? 'no' : 'ok');
+  pill.textContent = r.conflicting ? 'conflicting'
+    : `converged · residual ${r.residual.toExponential(1)}`;
+}
+
+let slide = 0;
+function paintControls() {
+  const box = $('ctls');
+  box.innerHTML = '<div class="lbl">Controls</div>';
+  for (const c of scene.controls || []) {
+    const wrap = document.createElement('div');
+    wrap.className = 'ctl';
+    if (c.type === 'toggle') {
+      wrap.innerHTML = `<div class="top"><span>${c.label}</span></div>`;
+      const t = document.createElement('div');
+      t.className = 'toggle';
+      for (const [val, label] of c.options) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = label;
+        b.setAttribute('aria-pressed', String(opts[c.k] === val));
+        if (val !== c.options[0][0]) b.className = 'cool';
+        b.onclick = () => { opts[c.k] = val; paintControls(); rebuild(); };
+        t.appendChild(b);
+      }
+      wrap.appendChild(t);
+    } else {
+      wrap.innerHTML = `<div class="top"><span>${c.label}</span>`
+        + `<span class="val">${opts[c.k]}${c.unit ? ' ' + c.unit : ''}</span></div>`;
+      const i = document.createElement('input');
+      i.type = 'range'; i.min = c.min; i.max = c.max; i.step = c.step; i.value = opts[c.k];
+      i.setAttribute('aria-label', c.label);
+      i.oninput = () => {
+        opts[c.k] = parseFloat(i.value);
+        wrap.querySelector('.val').textContent = opts[c.k] + (c.unit ? ' ' + c.unit : '');
+        clearTimeout(slide);
+        slide = setTimeout(rebuild, 90);   // a drag is one rebuild, not thirty
+      };
+      wrap.appendChild(i);
+    }
+    box.appendChild(wrap);
+  }
+  const again = document.createElement('button');
+  again.className = 'act'; again.type = 'button'; again.textContent = 'draw it rough again';
+  again.onclick = rebuild;
+  box.appendChild(again);
+}
+
+// The source shown is the function that just ran, not a copy of it.
+function source(fn) {
+  let s = String(fn);
+  s = s.slice(s.indexOf('{') + 1, s.lastIndexOf('}')).replace(/^\n+|\s+$/g, '');
+  const lines = s.split('\n');
+  const pad = Math.min(...lines.filter(l => l.trim()).map(l => l.match(/^ */)[0].length));
+  return lines.map(l => l.slice(pad)).join('\n');
+}
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function highlight(s) {
+  return esc(s)
+    .replace(/(\/\/[^\n]*)/g, '<span class="c">$1</span>')
+    .replace(/(&#39;|')([^']*)\1/g, "<span class='s'>'$2'</span>")
+    .replace(/\b(const|let|for|of|if|return|new|function|undefined)\b/g, '<span class="k">$1</span>')
+    .replace(/\b(S)\.(\w+)/g, '<span class="n">S</span>.$2');
+}
+
+function paintScene() {
+  $('blurb').innerHTML = `<h2>${scene.title}</h2>`
+    + scene.blurb.map(p => `<p>${p}</p>`).join('');
+  $('src').innerHTML = highlight(source(scene.build));
+  $('srcname').textContent = scene.name + '.build(S, o)';
+  paintControls();
+}
+
+function show(sc) {
+  scene = sc;
+  opts = optsFor(sc);
+  needFrame = true;
+  [...$('tabs').children].forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.k === sc.name)));
+  paintScene();
+  rebuild();
+}
+
+// ======================================================================
+// wiring
+// ======================================================================
+const prefersStill = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+SCENES.forEach((sc, i) => {
+  const b = document.createElement('button');
+  b.type = 'button'; b.dataset.k = sc.name;
+  b.innerHTML = `<span class="n">${String(i + 1).padStart(2, '0')}</span>`
+    + `<span>${sc.name}</span>`;
+  b.title = sc.tag;
+  b.onclick = () => show(sc);
+  $('tabs').appendChild(b);
+});
+
+function size() {
+  const r = cv.parentElement.getBoundingClientRect();
+  DPR = Math.min(devicePixelRatio || 1, 2);
+  W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+}
+addEventListener('resize', size);
+
+let drag = null;
+const pts = new Map();
+cv.addEventListener('pointerdown', (e) => {
+  cam.auto = false;
+  pts.set(e.pointerId, [e.clientX, e.clientY]);
+  drag = [e.clientX, e.clientY];
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!pts.has(e.pointerId)) return;
+  const prev = pts.get(e.pointerId);
+  pts.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pts.size === 2) {
+    const [a, b] = [...pts.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (drag && drag.pinch) cam.dist = Math.max(40, Math.min(420, cam.dist * drag.pinch / d));
+    drag = { pinch: d };
+    return;
+  }
+  cam.yaw -= (e.clientX - prev[0]) * 0.008;
+  cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch + (e.clientY - prev[1]) * 0.006));
+});
+const release = (e) => { pts.delete(e.pointerId); if (!pts.size) drag = null; };
+cv.addEventListener('pointerup', release);
+cv.addEventListener('pointercancel', release);
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault(); cam.auto = false;
+  cam.dist = Math.max(40, Math.min(420, cam.dist * Math.exp(e.deltaY * 0.0012)));
+}, { passive: false });
+
+size();
+show(SCENES[0]);
+frame();
+window.__ready = true;
+})();
+</script>
+</body>
+</html>

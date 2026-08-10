@@ -468,6 +468,33 @@ console.log('\n--- every other constraint, verified from the geometry ---');
   const ar = S.arc(cs[0], 5, 5, [0.2, 0.2, 0]);
   ok(S.constrain('planar', ar).n === 0, 'and so is an arc');
 }
+{
+  // The trap this constraint has to avoid, and the reason its rows are divided
+  // by |e1 x e2| rather than by |e1||e2|. The plane comes from the first three
+  // control points; normalise by the product of the lengths and every row can
+  // be zeroed by making those three collinear instead of by flattening
+  // anything. Given anything else to hold the points apart, a solver finds
+  // that first -- it is the cheaper direction -- and reports `converged` with
+  // the curve millimetres out of plane and the constraint quietly gone.
+  const S = new Sketch3D();
+  const P = [[0, 0, 0], [30, 20, 16], [56, -6, -12], [74, 22, 18], [48, 44, -8], [8, 36, 12]];
+  const c = P.map(p => S.point(p[0], p[1], p[2]));
+  S.fix(c[0]);
+  const nb = S.nurbs(c, { degree: 3, closed: true });
+  S.constrain('distance', { p: c[0] }, { p: c[3] }, 80);
+  S.constrain('distance', { p: c[1] }, { p: c[4] }, 42);
+  S.constrain('planar', nb);
+  const r = S.solve();
+  ok(r.converged, `planar alongside two dimensions converged in ${r.iterations} iterations`);
+  const dev = M3.planeOf(S.sample(nb, 0.02)).deviation;
+  ok(dev < 1e-6, `and the curve really is flat (${dev.toExponential(1)} mm), not just `
+     + 'reported so');
+  const g = [0, 1, 2].map(i => S.posOf({ p: c[i] }));
+  const e1 = sub(g[1], g[0]), e2 = sub(g[2], g[0]);
+  const spread = len(cross(e1, e2)) / (len(e1) * len(e2));
+  ok(spread > 0.1, `the plane's own reference triangle did not collapse to escape `
+     + `(sin ${spread.toFixed(3)})`);
+}
 
 // ======================================================================
 console.log('\n--- tangency, and what it costs in space ---');
@@ -535,6 +562,51 @@ console.log('\n--- tangency, and what it costs in space ---');
       if (Math.abs(d - (R[i] + R[j])) < 1e-4) outside++;
     }
   ok(outside === 3, 'all three pairs landed outside each other, none nested');
+}
+
+// ======================================================================
+console.log('\n--- the freedom a circular arc has that changes nothing ---');
+{
+  // Turn the frame about the arc's own normal and slide both extents back by
+  // the same angle: rx*cos(t)*u + ry*sin(t)*v with rx == ry is a rotation, so
+  // the two turns cancel and the curve drawn is the one that was there. The
+  // solver can walk along that direction forever without moving the picture,
+  // which is why `dof` reads one high for every circular arc in a sketch.
+  const turned = (rx, ry, rot, th) => {
+    const S = new Sketch3D();
+    const c = S.point(2, -1, 3);
+    const a = S.arc(c, rx, ry, rot, 0.4, 2.9);
+    const before = S.sample(a, 0.001);
+    const g = S.get(a), F = M3.frameOf(...g.rot);
+    // the same frame turned about its own normal: u' = cos.u + sin.v, and so on
+    const ct = Math.cos(th), st = Math.sin(th);
+    const u = F[0].map((_, i) => ct * F[0][i] + st * F[1][i]);
+    const v = F[0].map((_, i) => -st * F[0][i] + ct * F[1][i]);
+    S.set(a, { rot: [Math.atan2(v[2], F[2][2]), Math.asin(-u[2]), Math.atan2(u[1], u[0])],
+               t0: g.t0 - th, t1: g.t1 - th });
+    const after = S.sample(a, 0.001);
+    return Math.max(...before.map((p, i) => len(sub(p, after[i]))));
+  };
+  const circ = turned(9, 9, [0.3, -0.2, 0.5], 0.37);
+  const ell = turned(9, 5, [0.3, -0.2, 0.5], 0.37);
+  ok(circ < 1e-12, `a circular arc is unmoved by it (${circ.toExponential(1)} mm)`);
+  ok(ell > 1, `an ellipse is not — it moves ${ell.toFixed(2)} mm, so it has no such freedom`);
+
+  // and the report shows it: pin everything about a circular arc that a person
+  // would call a dimension, and one degree of freedom is still reported
+  const S = new Sketch3D();
+  const c = S.point(0, 0, 0, { fixed: true });
+  const a = S.arc(c, 9, 9, [0, 0, 0.3], 0.4, 2.9);
+  S.constrain('circular', a);
+  S.constrain('radius', a, undefined, 9);
+  for (const t of [Math.PI / 2, Math.PI])
+    S.constrain('horizontal', { e: a, t: S.param(t, { fixed: true }) });
+  const ends = [S.point(9, 0, 0, { fixed: true }), S.point(0, 9, 0, { fixed: true })];
+  S.constrain('coincident', { e: a, end: 0 }, { p: ends[0] });
+  S.constrain('coincident', { e: a, end: 1 }, { p: ends[1] });
+  const r = S.solve();
+  ok(r.converged && r.dof === 1,
+     `a fully dimensioned circular arc still reports ${r.dof} DOF, and that is the one`);
 }
 
 // ======================================================================

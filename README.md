@@ -12,6 +12,7 @@ STL output. Dependency-free JavaScript.
 | `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
 | `sweep.js` | a profile dragged along a sketch path, at a scale that may vary |
 | `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
+| `demo3d.html` | the 3D sketcher, drawn rough and solved in front of you |
 
 They are separate because they are used separately: a mesher, a slicer or a
 test wants the first and not the second.
@@ -319,8 +320,17 @@ extrudable.
 📖 **[SKETCH3D.md](SKETCH3D.md) is the full API reference.**
 
 ```
-node check-sketch3d.mjs    # 164 assertions
+open demo3d.html           # five sketches, drawn rough and solved in front of you
+node check-sketch3d.mjs    # 170 assertions
 ```
+
+`demo3d.html` is a plain page next to the modules, like `viewer.html` and for
+the same reason: it consumes `sketch3d.js` the way an application would, so
+anything it cannot do without reaching inside is a finding about the API. It
+drives the solver a step per frame — so every scene arrives as a rough drawing
+and settles while you watch — reads the profile back, and hands the distance
+field to `surfaceNets`. The report beside it is the real one, `redundant`
+included.
 
 ## Sweeps (`sweep.js`)
 
