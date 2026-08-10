@@ -9,6 +9,7 @@ STL output. Dependency-free JavaScript.
 | `sinterform.js` | the kernel — geometry, and nothing that knows a GPU exists |
 | `glsl.js` | the shader half of each primitive, and the two shader budgets |
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
+| `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
 | `sweep.js` | a profile dragged along a sketch path, at a scale that may vary |
 | `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
 
@@ -264,6 +265,61 @@ characteristics worth knowing about before relying on it.
 
 ```
 node check-sketch.mjs      # 110 assertions
+```
+
+## Sketches in space (`sketch3d.js`)
+
+The same file one dimension up: points, lines, elliptical arcs and NURBS in
+space, the same constraints, the same caller-driven solver. Self-contained in
+the same way — and deliberately not an extension of `sketch.js`, because two
+dimensions and three are different enough that a shared file would be a pile
+of `if (is3d)`.
+
+```js
+const { Sketch3D } = require('./sketch3d.js');
+const S = new Sketch3D();
+const a = S.point(0, 0, 0, { fixed: true });
+const b = S.point(10, 3, 4);
+const ln = S.line(a, b);
+S.constrain('horizontal', { e: ln });     // lies in a horizontal plane
+S.constrain('distance', { p: a }, { p: b }, 20);
+S.solve();            // → { converged, dof, rank, equations, rows, … }
+```
+
+Four things change, and none of them is cosmetic.
+
+**Rows are not equations.** In the plane "parallel" is one scalar — the cross
+product. In space the cross product is a vector, and setting it to zero is
+three rows that can only ever have rank two, because two directions in space
+differ by two angles. There is no way to write it in two rows without picking
+a frame perpendicular to one of them, and no way to pick that frame smoothly
+everywhere. So the rows stay and **each constraint declares the rank it
+carries** alongside them; the report gives `rows` and `equations` separately,
+and `redundant` counts against the second. A sketcher that counts the rows
+tells people an ordinary sketch is over-constrained.
+
+**An arc carries a frame** — three Euler angles rather than one, applied
+Rz·Ry·Rx as in the kernel but in radians as in `sketch.js`. A bare number for
+the rotation means about +Z alone, which is exactly the 2D `phi`, so a planar
+sketch lifts across unchanged.
+
+**Angles are unsigned.** A signed angle needs an axis to be signed about.
+
+**A closed loop does not bound anything** unless it is planar, and a wireframe
+bounds no volume at all. So there is no argument-free `sdf3d`: there is
+`profile()`, which groups planar loops into faces with a plane apiece;
+`extrude`, which turns a face into an exact solid along **its own normal**
+(along Z would be a shear); and `wire`, which gives the drawn curves a radius.
+
+Two constraints exist here that have nothing to say in the plane: `coplanar`,
+that two lines meet or are parallel, and `planar`, that a spline's control
+points share a plane — which is what gets a curve in space back to something
+extrudable.
+
+📖 **[SKETCH3D.md](SKETCH3D.md) is the full API reference.**
+
+```
+node check-sketch3d.mjs    # 164 assertions
 ```
 
 ## Sweeps (`sweep.js`)

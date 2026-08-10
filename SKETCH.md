@@ -7,6 +7,10 @@ redundancy and conflict.
 Self-contained: no DOM, no GL, no dependency on `sinterform.js`, no
 dependencies at all. Apache-2.0.
 
+For the same thing in space — points with a z, arcs with a plane, loops that
+have to be flat before they are faces — see
+[SKETCH3D.md](SKETCH3D.md) and `sketch3d.js`.
+
 ```js
 const { Sketch } = require('./sketch.js');      // or <script>, see below
 ```
