@@ -266,10 +266,11 @@ footer b { color: var(--dim); font-weight: 400; }
 
 <script src="sinterform.js"></script>
 <script src="sketch3d.js"></script>
+<script src="sweep.js"></script>
 <script>
 "use strict";
 (function () {
-const SK = SinterSketch3D, SF = SinterForm;
+const SK = SinterSketch3D, SF = SinterForm, SW = SinterSweep;
 const $ = (id) => document.getElementById(id);
 const TAU = Math.PI * 2;
 
@@ -437,6 +438,56 @@ const SCENES = [{
     return { extrude: o.thick, curve: nb };
   }
 }, {
+  name: 'sweep', view: { yaw: -0.66, pitch: 0.34 }, tag: 'a profile dragged along it',
+  title: 'A solved path in space is a path a profile can be dragged along',
+  blurb: [
+    `<code>sweep.js</code> takes a path from either sketcher — it asks for samples
+     and gets points with two coordinates or three. So this arc and spline, solved
+     in space, are a path with no conversion in between.`,
+    `In the plane the profile's orientation is decided for it: v is +Z and u is the
+     path's normal. In space there is no distinguished up, and the textbook answer —
+     the Frenet frame — turns its normal over at every inflection, which would flip
+     the section halfway along. So the frame is <b>carried</b>: at each joint it turns
+     by the smallest rotation that takes one tangent onto the next, and never further
+     than the tangent made it.`,
+    `The profile's size is still a function of how far along you are — a number, a
+     function of <em>t</em>, or one factor per path point — and it costs what it always
+     did: a tapered surface is slanted, so the field becomes a safe bound rather than a
+     distance. Against the kernel's own cone in the same slanted frame, the two meshes
+     agree on volume to 0.00%.`,
+    `That leaves the roll free, which is what <em>twist</em> spends. It also means a
+     closed path in space need not bring the frame back to where it started — it
+     returns turned by the area its tangent traced on the sphere. That residue is
+     measured and spread along the path, so no joint is worse than its neighbours.`],
+  controls: [
+    { k: 'size', label: 'Section width', min: 3, max: 14, step: .5, value: 8, unit: 'mm' },
+    { k: 'taper', label: 'Size at the far end', min: .3, max: 2.5, step: .1, value: 1.8, unit: '\u00d7' },
+    { k: 'twist', label: 'Twist', min: 0, max: 360, step: 15, value: 0, unit: '\u00b0' }],
+  readout: 'sweep', fill: false,
+  build: function (S, o) {
+    const a = S.point(-34, -18, 0, { fixed: true });
+    const b = S.point(2, -12, 4);                       // drawn roughly, as ever
+    const l1 = S.line(a, b);
+    const cc = S.point(2, 6, 2);
+    const el = S.arc(cc, 14, 10, [0.3, 0.15, 0], -Math.PI / 2, Math.PI / 2);
+    S.constrain('coincident', { e: l1, end: 1 }, { e: el, end: 0 });
+    S.constrain('parallel', { e: l1, end: 1 }, { e: el, end: 0 });
+    S.constrain('circular', el);
+    S.constrain('radius', el, undefined, 16);
+    S.constrain('horizontal', { e: l1 });
+    S.constrain('distance', { p: a }, { p: b }, 36);
+    for (const t of [0, Math.PI / 2])
+      S.constrain('horizontal', { e: el, t: S.param(t, { fixed: true }) });
+
+    // and out of the plate on a spline, which is the shape a flat sweep
+    // has no way to express at all
+    const rise = [S.point(2, 22, 2), S.point(-16, 30, 14),
+                  S.point(-34, 16, 26), S.point(-44, -8, 16)];
+    const nb = S.nurbs(rise, { degree: 3 });
+    S.constrain('coincident', { e: el, end: 1 }, { p: rise[0] });
+    return { path: [l1, el, nb], size: o.size, taper: o.taper, twist: o.twist };
+  }
+}, {
   name: 'wire', view: { yaw: -0.58, pitch: 0.40 }, tag: 'a solid with a radius',
   title: 'A wireframe is a solid once you give it a thickness',
   blurb: [
@@ -513,7 +564,7 @@ function project(p) {
 // ======================================================================
 let scene = SCENES[0], opts = {}, S = null, run = null, marks = {};
 let solving = false, report = null, live = '', mesh = null, meshInfo = '';
-let faces = null, curves = [], readout = '';
+let faces = null, curves = [], readout = '', lastField = null;
 
 function optsFor(sc) {
   const o = {};
@@ -539,6 +590,33 @@ function sampleCurves() {
     if (e.kind !== 'line' && e.kind !== 'arc' && e.kind !== 'nurbs') continue;
     curves.push({ pts: S.sample(e.id, 0.08), con: !!e.construction });
   }
+}
+
+// Douglas-Peucker, because a sweep costs O(path segments) a sample and a
+// spline hands back a fixed density that is finer than the picture needs. The
+// shape is held to `tol`; the segment count usually falls by half.
+function decimate(pts, tol) {
+  if (pts.length < 3) return pts.slice();
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [i, j] = stack.pop();
+    if (j <= i + 1) continue;
+    const a = pts[i], b = pts[j];
+    const e = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const L2 = e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
+    let worst = -1, at = -1;
+    for (let k = i + 1; k < j; k++) {
+      const w = [pts[k][0] - a[0], pts[k][1] - a[1], pts[k][2] - a[2]];
+      let t = L2 > 0 ? (w[0] * e[0] + w[1] * e[1] + w[2] * e[2]) / L2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const d = Math.hypot(w[0] - e[0] * t, w[1] - e[1] * t, w[2] - e[2] * t);
+      if (d > worst) { worst = d; at = k; }
+    }
+    if (worst > tol) { keep[at] = 1; stack.push([i, at], [at, j]); }
+  }
+  return pts.filter((_, k) => keep[k]);
 }
 
 // A shear along Z, for the bracket's comparison. Deliberately not `extrude`:
@@ -636,10 +714,26 @@ function recompute() {
   if (prof) faces = prof;
   const t0 = performance.now();
   let field = null, res = 0.9;
-  if (marks.wire) { field = S.wire(marks.wire, 0.25); res = Math.max(0.7, marks.wire / 4.5); }
+  if (marks.path) {
+    // one polyline out of several entities, in the order they connect
+    const pts = [];
+    for (const id of marks.path)
+      for (const p of S.sample(id, 0.2)) {
+        const last = pts[pts.length - 1];
+        if (!last || Math.hypot(last[0] - p[0], last[1] - p[1], last[2] - p[2]) > 1e-6) pts.push(p);
+      }
+    // the profile's size along the path: one number, a function of how far
+    // along you are, or one factor per point. A constant one stays exact.
+    const k = marks.taper;
+    field = SW.along(decimate(pts, 0.4), SW.PROFILES.rect(marks.size, marks.size * 0.45, 1),
+                     { twist: marks.twist * Math.PI / 180,
+                       scale: k === 1 ? undefined : (t) => 1 + (k - 1) * t });
+    res = 1.0;
+  } else if (marks.wire) { field = S.wire(marks.wire, 0.25); res = Math.max(0.7, marks.wire / 4.5); }
   else if (prof && prof.faces.length && marks.extrude > 0)
     field = marks.shear ? shearZ(prof.faces[0], marks.extrude)
                         : S.extrude(prof.faces[0], marks.extrude);
+  lastField = field;
   if (field) {
     const raw = meshOf(field, res);
     if (raw && raw.indices.length) {
@@ -656,6 +750,14 @@ function measure(prof) {
     const a = S.get(marks.measure[0]), b = S.get(marks.measure[1]);
     return `centre distance ${Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z).toFixed(3)} mm`
          + ` · off the plate ${Math.abs(b.z).toFixed(3)} mm`;
+  }
+  if (scene.readout === 'sweep' && lastField) {
+    const why = [];
+    if (opts.taper !== 1) why.push('tapers');
+    if (opts.twist) why.push('twists');
+    return `${lastField.segments} segments · ${lastField.arcLength.toFixed(1)} mm of path`
+         + ` · section ${(marks.size).toFixed(1)}→${(marks.size * marks.taper).toFixed(1)} mm`
+         + ` · ${lastField.exact ? 'exact' : 'a bound — it ' + why.join(' + ')}`;
   }
   if (scene.readout === 'flatness' && marks.curve !== undefined) {
     const pl = SK.planeOf(S.sample(marks.curve, 0.05));

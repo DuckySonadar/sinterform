@@ -380,6 +380,23 @@ This is the operator the 2D file left to its caller, and it is here because in
 space the direction is not obvious: extruding a tilted face along Z is a shear,
 not an extrusion.
 
+### Sweeping along one
+
+`sweep.js` takes a path from either sketcher, so a curve solved here is a path
+without any conversion:
+
+```js
+const SW = require('./sweep.js');
+SW.fromSketch(S, { entity: curveId }, SW.PROFILES.circle(4));
+SW.fromSketch(S, { face: 0 }, SW.PROFILES.rect(6, 3));    // a face's boundary
+```
+
+In space the profile's orientation stops being obvious — there is no
+distinguished up, and the Frenet frame turns over at every inflection — so the
+frame is carried along the path by the smallest rotation at each joint. See
+the sweep section of [README.md](README.md#a-path-through-space-the-frame-is-carried-not-computed),
+including what a closed path in space does to it.
+
 ### `wire([radius = 1], [tol]) → f`
 
 The drawn curves given a radius: exact, 1-Lipschitz, negative inside.

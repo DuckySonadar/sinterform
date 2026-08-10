@@ -2,10 +2,39 @@
  * Copyright (c) 2026 DuckySonadar
  * SPDX-License-Identifier: Apache-2.0
  *
- * Takes a path in the XY plane -- any polyline, so anything sketch.js can
- * sample, open or closed -- and a 2D profile, and drags the second along the
- * first at a scale that may vary as it goes. Out comes a 3D signed distance
- * function.
+ * Takes a path -- any polyline, so anything sketch.js or sketch3d.js can
+ * sample, open or closed, flat or through space -- and a 2D profile, and drags
+ * the second along the first at a scale that may vary as it goes. Out comes a
+ * 3D signed distance function.
+ *
+ * A path point may be [x, y] or [x, y, z]. Two-coordinate points sit at
+ * `opts.z`, which is what this file used to assume of all of them.
+ *
+ * ----------------------------------------------------------------------
+ * One dimension up: the profile's orientation stops being obvious
+ * ----------------------------------------------------------------------
+ * In the XY plane there is nothing to decide. The profile's v axis is +Z and
+ * its u axis is the path's normal, and that is the only frame there is.
+ *
+ * In space there is no distinguished up, and worse, there is no continuous
+ * choice to be made pointwise: any rule of the form "take the normal" breaks
+ * where the path is straight, and the Frenet frame -- the textbook answer --
+ * flips its normal through 180 degrees at every inflection. Sweep a rectangle
+ * along an S-bend with it and the section turns over halfway along.
+ *
+ * So the frame is not chosen at each point, it is *carried*: start with one
+ * frame, and at every joint rotate it by the smallest rotation that takes the
+ * old tangent onto the new one. That is the rotation-minimising frame, it is
+ * defined wherever the tangent is, and it does not twist unless the path makes
+ * it.
+ *
+ * The price is that a closed path in space need not bring the frame back to
+ * where it started -- it comes back rotated by the solid angle the tangent
+ * swept out, which is a fact about the sphere and not something to be fixed by
+ * being careful. So the residue is measured and spread along the path instead,
+ * which trades a seam nobody asked for against a twist of a few degrees over
+ * the whole loop. `f.holonomy` reports what it was. A closed *flat* path has
+ * none, so nothing here changes what this file did before.
  *
  * ----------------------------------------------------------------------
  * Why self-intersection is fine, and what that costs
@@ -51,6 +80,63 @@
 (function (root) {
 "use strict";
 
+// ======================================================================
+// vectors, only as much as carrying a frame needs
+// ======================================================================
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1],
+                          a[2] * b[0] - a[0] * b[2],
+                          a[0] * b[1] - a[1] * b[0]];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const len3 = (a) => Math.hypot(a[0], a[1], a[2]);
+const unit3 = (a) => { const l = len3(a) || 1e-300; return [a[0] / l, a[1] / l, a[2] / l]; };
+const dist3 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+// Rodrigues, for a unit axis.
+function turn(v, k, th) {
+  const c = Math.cos(th), s = Math.sin(th);
+  const kv = cross3(k, v), d = dot3(k, v) * (1 - c);
+  return [v[0] * c + kv[0] * s + k[0] * d,
+          v[1] * c + kv[1] * s + k[1] * d,
+          v[2] * c + kv[2] * s + k[2] * d];
+}
+
+// The smallest rotation taking t0 onto t1, applied to a frame. This is the
+// whole of the rotation-minimising frame: no normal is ever computed, so
+// there is nothing to flip at an inflection and nothing to be undefined where
+// the path runs straight.
+function transport(U, V, t0, t1) {
+  const ax = cross3(t0, t1), s = len3(ax), c = dot3(t0, t1);
+  if (s < 1e-12) {
+    // Parallel, or a doubling-back. A reversal has no axis to speak of -- any
+    // one perpendicular to the tangent turns it -- and it is a capped end of
+    // the material anyway, so keep u and flip v, which stays right-handed.
+    return c > 0 ? [U, V] : [U, [-V[0], -V[1], -V[2]]];
+  }
+  const k = [ax[0] / s, ax[1] / s, ax[2] / s];
+  const th = Math.atan2(s, c);
+  return [turn(U, k, th), turn(V, k, th)];
+}
+
+// (u, v, t) right-handed, so u x v = t and t x u = v. In the XY plane with
+// v = +Z this gives u = (-ty, tx, 0), which is exactly the frame this file
+// used before there was a choice to make.
+function firstFrame(t, up) {
+  for (const cand of [up, [0, 0, 1], [1, 0, 0], [0, 1, 0]]) {
+    const d = dot3(cand, t);
+    const v = [cand[0] - t[0] * d, cand[1] - t[1] * d, cand[2] - t[2] * d];
+    if (len3(v) > 1e-9) { const V = unit3(v); return [cross3(V, t), V]; }
+  }
+  return [[1, 0, 0], [0, 1, 0]];   // unreachable: t cannot be parallel to all three
+}
+
+// Rotate a frame about its own tangent. Turning the frame by w turns a fixed
+// point's coordinates in it by -w, which is what the evaluator undoes.
+function spin(U, V, w) {
+  const c = Math.cos(w), s = Math.sin(w);
+  return [[U[0] * c + V[0] * s, U[1] * c + V[1] * s, U[2] * c + V[2] * s],
+          [V[0] * c - U[0] * s, V[1] * c - U[1] * s, V[2] * c - U[2] * s]];
+}
+
 // A 2D profile is any (u, v) -> signed distance, where u runs across the path
 // and v runs up. These are here so the common cases need no ceremony.
 const PROFILES = {
@@ -85,16 +171,24 @@ function profileRadius(profile) {
 
 /* Build a sweep.
  *
- *   path      [[x, y], ...] in mm. From sketch.sample(id) or a profile loop.
+ *   path      [[x, y], ...] or [[x, y, z], ...] in mm. From sketch.sample(id),
+ *             sketch3d.sample(id), or a profile loop from either.
  *   profile   (u, v) -> mm. u across the path, v up. Optional `.radius`.
  *   opts.closed   join the last point back to the first
  *   opts.scale    a number, a function of t in [0, 1] by arc length, or an
  *                 array of one factor per path point
- *   opts.z        the height the path sits at (default 0)
+ *   opts.z        the height two-coordinate path points sit at (default 0)
+ *   opts.up       which way the profile's v axis leans at the start of the
+ *                 path, as far as the tangent allows (default +Z)
+ *   opts.twist    radians of roll about the path, as a number over the whole
+ *                 path or a function of t in [0, 1]
+ *   opts.closeFrame  on a closed path, spread the frame's holonomy along it so
+ *                 the section joins up (default true)
  *   opts.join     'round' (default) or 'miter' at sharp corners
  *   opts.miterLimit  how far a miter may run on, in profile radii (default 4)
  *
- * Returns f(x, y, z) -> mm, carrying .bounds, .arcLength and .segments.
+ * Returns f(x, y, z) -> mm, carrying .bounds, .arcLength, .segments, .frames
+ * and .holonomy.
  */
 function along(path, profile, opts) {
   opts = opts || {};
@@ -103,26 +197,22 @@ function along(path, profile, opts) {
   const R = profileRadius(profile);
 
   // ---- drop repeated points, or a zero-length segment makes a NaN tangent --
+  // A two-coordinate point sits at z0, which is what every point used to be.
   const pts = [];
   for (const p of path) {
+    const q = [p[0], p[1], p.length > 2 ? p[2] : z0];
     const last = pts[pts.length - 1];
-    if (last && Math.hypot(last[0] - p[0], last[1] - p[1]) < 1e-12) continue;
-    pts.push([p[0], p[1]]);
+    if (last && dist3(last, q) < 1e-12) continue;
+    pts.push(q);
   }
-  if (closed && pts.length > 1) {
-    const a = pts[0], b = pts[pts.length - 1];
-    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-12) pts.pop();
-  }
+  if (closed && pts.length > 1 && dist3(pts[0], pts[pts.length - 1]) < 1e-12) pts.pop();
   if (pts.length < 2) throw new Error('a sweep needs at least two distinct path points');
 
   // ---- arc length, so `scale` can be a function of how far along you are ---
   const n = pts.length;
   const last = closed ? n : n - 1;
   const cum = [0];
-  for (let i = 0; i < last; i++) {
-    const a = pts[i], b = pts[(i + 1) % n];
-    cum.push(cum[i] + Math.hypot(b[0] - a[0], b[1] - a[1]));
-  }
+  for (let i = 0; i < last; i++) cum.push(cum[i] + dist3(pts[i], pts[(i + 1) % n]));
   const total = cum[last];
 
   const scaleAt = (i) => {
@@ -137,9 +227,49 @@ function along(path, profile, opts) {
   const tan = [];
   for (let i = 0; i < last; i++) {
     const a = pts[i], b = pts[(i + 1) % n];
-    const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
-    tan.push([dx / L, dy / L, L]);
+    const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], L = len3(d);
+    tan.push([d[0] / L, d[1] / L, d[2] / L, L]);
   }
+
+  // ---- carry a frame along the path ------------------------------------
+  // Started from `up`, then rotated at each joint by the smallest rotation
+  // that takes one tangent onto the next. Re-orthogonalised as it goes, since
+  // a few thousand small rotations otherwise drift off the unit sphere.
+  const frames = [];
+  {
+    let [U, V] = firstFrame(tan[0], opts.up || [0, 0, 1]);
+    frames.push([U, V]);
+    for (let i = 1; i < tan.length; i++) {
+      [U, V] = transport(U, V, tan[i - 1], tan[i]);
+      V = unit3([V[0] - tan[i][0] * dot3(V, tan[i]),
+                 V[1] - tan[i][1] * dot3(V, tan[i]),
+                 V[2] - tan[i][2] * dot3(V, tan[i])]);
+      U = cross3(V, tan[i]);
+      frames.push([U, V]);
+    }
+  }
+
+  // How far the frame fails to come back to itself, going the whole way round.
+  // A flat closed path has none of this; one that leaves the plane generally
+  // does, and no choice of starting frame removes it -- it is the area the
+  // tangent traced on the sphere. Spread along the path it becomes a twist of
+  // a few degrees; left alone it is a seam at one station.
+  let holonomy = 0;
+  if (closed && tan.length > 1) {
+    const [Ue] = transport(frames[tan.length - 1][0], frames[tan.length - 1][1],
+                           tan[tan.length - 1], tan[0]);
+    const [U0, V0] = frames[0];
+    holonomy = Math.atan2(dot3(Ue, V0), dot3(Ue, U0));
+  }
+  const closeFrame = opts.closeFrame === undefined ? true : !!opts.closeFrame;
+  const twistAt = (s) => {
+    const t = total ? s / total : 0;
+    let w = 0;
+    if (typeof opts.twist === 'number') w += opts.twist * t;
+    else if (typeof opts.twist === 'function') w += opts.twist(t);
+    if (closed && closeFrame) w -= holonomy * t;
+    return w;
+  };
   // Does the path carry on through this joint, or double back on itself?
   //
   // A joint the path continues through is interior to the material: capping
@@ -152,7 +282,7 @@ function along(path, profile, opts) {
   // both segments cap flat, and nothing fills the wedge between them. On a
   // 120 degree corner with a 6 mm profile, material reached 0.05 mm past the
   // vertex instead of 6.
-  const dotOf = (i, j) => tan[i][0] * tan[j][0] + tan[i][1] * tan[j][1];
+  const dotOf = (i, j) => dot3(tan[i], tan[j]);
   const reverses = (i, j) => dotOf(i, j) < -0.999999;
 
   // Sharp corners take one of the two usual joins.
@@ -174,11 +304,10 @@ function along(path, profile, opts) {
   };
 
   const seg = [];
-  let sMax = 0;
+  let sMax = 0, rolled = false;
   for (let i = 0; i < last; i++) {
-    const a = pts[i], b = pts[(i + 1) % n];
-    const dx = b[0] - a[0], dy = b[1] - a[1];
-    const L = Math.hypot(dx, dy);
+    const a = pts[i];
+    const T = tan[i], L = T[3];
     const sA = scaleAt(i), sB = scaleAt(i + 1);
     sMax = Math.max(sMax, sA, sB);
     // Cap only where the path really ends. A joint between two segments is
@@ -198,22 +327,39 @@ function along(path, profile, opts) {
     // the miter limit clipped the run-on, the flat cap is the bevel.
     const capA = (!closed && first) || reverses(pi, i) || e0 > 1e-9;
     const capB = (!closed && lastSeg) || reverses(i, ni) || e1 > 1e-9;
+    // The frame this segment carries, rolled to where the twist has got to.
+    // w0 is baked into the frame and costs nothing; only what is left to turn
+    // *within* the segment has to be undone per sample, and below a ten
+    // thousandth of a radian across one segment that is not worth two trig
+    // calls a sample, so it is folded into the frame as well.
+    const w0 = twistAt(cum[i]);
+    let dw = twistAt(cum[i + 1]) - w0;
+    if (Math.abs(w0) > 1e-12 || Math.abs(dw) > 1e-12) rolled = true;
+    const [U, V] = spin(frames[i][0], frames[i][1], Math.abs(dw) < 1e-4 ? w0 + dw / 2 : w0);
+    if (Math.abs(dw) < 1e-4) dw = 0;
     // The surface of a tapered sweep is slanted by this much, and the
     // profile's distance is measured across the sweep rather than square to
-    // that slant. Dividing by the secant puts it back to a safe bound.
+    // that slant. Dividing by the secant puts it back to a safe bound. A twist
+    // slants it the same way, at right angles to the taper, so the two go in
+    // together.
+    const sHi = Math.max(sA, sB);
     const slope = L > 0 ? R * Math.abs(sB - sA) / L : 0;
-    seg.push({ ax: a[0], ay: a[1], tx: dx / L, ty: dy / L, L, sA, sB, capA, capB,
-               e0, e1, taper: Math.sqrt(1 + slope * slope) });
+    const roll = L > 0 ? R * sHi * Math.abs(dw) / L : 0;
+    seg.push({ ax: a[0], ay: a[1], az: a[2],
+               tx: T[0], ty: T[1], tz: T[2],
+               ux: U[0], uy: U[1], uz: U[2],
+               vx: V[0], vy: V[1], vz: V[2],
+               L, sA, sB, capA, capB, e0, e1, dw,
+               taper: Math.sqrt(1 + slope * slope + roll * roll) });
   }
 
   const f = function (x, y, z) {
-    const v = z - z0;
     let best = Infinity;
     for (let i = 0; i < seg.length; i++) {
       const S = seg[i];
-      const px = x - S.ax, py = y - S.ay;
+      const px = x - S.ax, py = y - S.ay, pz = z - S.az;
       // where along this segment, and how far past its ends
-      const proj = px * S.tx + py * S.ty;
+      const proj = px * S.tx + py * S.ty + pz * S.tz;
       const t = proj < 0 ? 0 : proj > S.L ? 1 : proj / S.L;
       // outside this segment's own span, and which end that is
       // a miter runs each segment on past its joint; a round join does not
@@ -222,8 +368,18 @@ function along(path, profile, opts) {
       const capThis = oStart > oEnd ? S.capA : S.capB;
       const capped = Math.max(S.capA ? oStart : -1e30, S.capB ? oEnd : -1e30);
       const s = S.sA + (S.sB - S.sA) * t;
-      // across the path, in the profile's own frame
-      const u = -px * S.ty + py * S.tx;
+      // across the path and up it, in the frame this segment carries. For a
+      // path in the XY plane that frame is (-ty, tx, 0) and +Z, so these are
+      // the two lines this file had before, spelt in three coordinates.
+      let u = px * S.ux + py * S.uy + pz * S.uz;
+      let v = px * S.vx + py * S.vy + pz * S.vz;
+      // whatever roll is left to do inside this segment, undone on the point
+      if (S.dw) {
+        const a = S.dw * t, ca = Math.cos(a), sa = Math.sin(a);
+        const u2 = u * ca + v * sa;
+        v = v * ca - u * sa;
+        u = u2;
+      }
       // a 2D distance scaled by s: profile(q/s)*s is exact for uniform s
       const d2 = s > 1e-9 ? profile(u / s, v / s) * s : Math.hypot(u, v);
       // Past the span, it matters a great deal which end this is.
@@ -266,18 +422,27 @@ function along(path, profile, opts) {
   };
 
   // ---- bounds ----------------------------------------------------------
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (const p of pts) {
-    x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]);
-    y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]);
-  }
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of pts)
+    for (let i = 0; i < 3; i++) {
+      if (p[i] < lo[i]) lo[i] = p[i];
+      if (p[i] > hi[i]) hi[i] = p[i];
+    }
   const reach = R * sMax;
-  f.bounds = { lo: [x0 - reach, y0 - reach, z0 - reach],
-               hi: [x1 + reach, y1 + reach, z0 + reach] };
+  f.bounds = { lo: lo.map(c => c - reach), hi: hi.map(c => c + reach) };
   f.arcLength = total;
   f.segments = seg.length;
   f.radius = R;
-  f.exact = opts.scale === undefined || typeof opts.scale === 'number';
+  f.holonomy = holonomy;
+  // The frame each segment carries, for anything that wants to draw it or to
+  // check that it is not turning over where the path bends.
+  f.frames = seg.map((S, i) => ({ p: pts[i], t: [S.tx, S.ty, S.tz],
+                                  u: [S.ux, S.uy, S.uz], v: [S.vx, S.vy, S.vz] }));
+  // A twist slants the surface the same way a varying scale does, so it costs
+  // the same claim: a safe bound rather than a distance.
+  // Whether it rolls, not whether anything was passed: `twist: 0` is not a
+  // twist, and a closed path whose holonomy came out zero has nothing to spread.
+  f.exact = (opts.scale === undefined || typeof opts.scale === 'number') && !rolled;
   return f;
 }
 
@@ -285,29 +450,53 @@ function along(path, profile, opts) {
  *
  *   fromSketch(S, { entity: id })      one curve, open unless it closes itself
  *   fromSketch(S, { loop: 0 })         a closed loop from S.profile()
+ *   fromSketch(S, { face: 0 })         a 3D sketch's face, outer loop
+ *   fromSketch(S, { face: 0, loop: 1 })   and its hole
+ *
+ * `S` is a Sketch or a Sketch3D -- nothing here knows which, it asks for
+ * samples and gets points with two coordinates or three. The two sketchers
+ * report a profile differently, though: one hands back loops, the other faces
+ * with loops in them, and that is the one thing this has to know.
  *
  * Everything else is `along`'s.
  */
+function loopsOf(prof, where) {
+  if (prof.loops) {                          // a 2D sketch: loops, no faces
+    if (where.face !== undefined)
+      throw new Error('{ face } wants a 3D sketch — this one has loops, not faces');
+    return prof.loops;
+  }
+  const faces = prof.faces || [];
+  if (where.face === undefined) {
+    const all = [];
+    for (const f of faces) for (const l of f.loops) all.push(l);
+    return all;
+  }
+  const f = faces[where.face];
+  if (!f) throw new Error(`no face ${where.face} — the sketch has ${faces.length}`);
+  return f.loops;
+}
+
 function fromSketch(S, where, profile, opts) {
   opts = Object.assign({}, opts);
   let path;
   if (where.entity !== undefined) {
     path = S.sample(where.entity, opts.tol || 0.05);
-    if (opts.closed === undefined) {
-      const a = path[0], b = path[path.length - 1];
-      opts.closed = Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6;
-    }
-  } else if (where.loop !== undefined) {
-    const prof = S.profile(opts.tol || 0.05);
-    const l = prof.loops[where.loop];
-    if (!l) throw new Error(`no loop ${where.loop} — the sketch has ${prof.loops.length}`);
+    if (opts.closed === undefined)
+      opts.closed = dist3(pad(path[0]), pad(path[path.length - 1])) < 1e-6;
+  } else if (where.loop !== undefined || where.face !== undefined) {
+    const loops = loopsOf(S.profile(opts.tol || 0.05), where);
+    const i = where.loop === undefined ? 0 : where.loop;
+    const l = loops[i];
+    if (!l) throw new Error(`no loop ${i} — there are ${loops.length}`);
     path = l.points;
     if (opts.closed === undefined) opts.closed = true;
   } else {
-    throw new Error('fromSketch wants { entity } or { loop }');
+    throw new Error('fromSketch wants { entity }, { loop } or { face }');
   }
   return along(path, profile, opts);
 }
+const pad = (p) => (p.length > 2 ? p : [p[0], p[1], 0]);
 
 const SinterSweep = { along, fromSketch, PROFILES, profileRadius };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterSweep;

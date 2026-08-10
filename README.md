@@ -10,7 +10,7 @@ STL output. Dependency-free JavaScript.
 | `glsl.js` | the shader half of each primitive, and the two shader budgets |
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
 | `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
-| `sweep.js` | a profile dragged along a sketch path, at a scale that may vary |
+| `sweep.js` | a profile dragged along a sketch path, flat or through space |
 | `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
 | `demo3d.html` | the 3D sketcher, drawn rough and solved in front of you |
 
@@ -334,8 +334,9 @@ included.
 
 ## Sweeps (`sweep.js`)
 
-Take a path in the XY plane — anything `sketch.js` can sample, open or closed
-— and drag a 2D profile along it, at a scale that may change as it goes.
+Take a path — anything `sketch.js` or `sketch3d.js` can sample, open or closed,
+flat or through space — and drag a 2D profile along it, at a scale that may
+change as it goes.
 
 ```js
 const SW = require('./sweep.js');
@@ -346,10 +347,57 @@ f.bounds;          // { lo, hi }, ready for surfaceNets
 f.exact;           // false once the scale varies — see below
 ```
 
+A path point is `[x, y]` or `[x, y, z]`; two-coordinate points sit at `opts.z`,
+which is what this file used to assume of all of them. `fromSketch` takes
+either sketcher — it asks for samples and gets points with two coordinates or
+three — and reaches a loop as `{ loop: i }` from a 2D sketch or `{ face: i }`
+/ `{ face: i, loop: j }` from a 3D one.
+
 A profile is any `(u, v) → mm`, with `u` across the path and `v` up;
 `PROFILES.circle`, `.rect` and `.halfCircle` cover the usual ones. `scale`
 takes a number, a function of arc length in `[0, 1]`, or one factor per path
 point.
+
+### A path through space: the frame is carried, not computed
+
+In the XY plane there is nothing to decide — the profile's *v* axis is +Z and
+its *u* axis is the path's normal, and that is the only frame there is.
+
+In space there is no distinguished up, and no rule that picks one pointwise
+will do: "take the normal" is undefined where the path runs straight, and the
+Frenet frame — the textbook answer — turns its normal through 180° at every
+inflection. Sweep a rectangle along an S-bend with it and the section flips
+halfway along. `check-sweep.mjs` counts those flips: three on its test bend.
+
+So the frame is **carried**. Start with one, and at each joint rotate it by the
+smallest rotation taking the old tangent onto the new one. That is the
+rotation-minimising frame; it exists wherever the tangent does, and it never
+turns further than the tangent made it — which is the property the suite
+asserts, because it is the one a Frenet frame breaks.
+
+`opts.up` leans the starting frame (default +Z), `opts.twist` rolls the section
+as it goes, in radians over the path or as a function of *t*, and `f.frames`
+hands back what each segment ended up with.
+
+**The profile's size varies exactly as it did in the plane** — `opts.scale` is
+still a number, a function of arc length in `[0, 1]`, or one factor per path
+point, and what stopped being flat is the path, not the profile. A rising scale
+along a line that points nowhere near an axis reproduces `PRIMS.cone` in that
+direction: meshed in the same frame the two agree on volume to 0.00%, and leave
+the *same* four unpaired edges, which is the mesher on a slanted sharp edge
+rather than anything about the field. Taper and twist together still come out
+1-Lipschitz, because the two slants are at right angles and both are divided
+back out.
+
+**A closed path in space need not bring the frame back.** It returns rotated by
+the area its tangent traced on the sphere — a fact about the sphere, not a bug
+to be careful around. `f.holonomy` reports it. Left alone it is a visible seam
+at one station for any profile that is not round; by default it is spread along
+the path instead, so it becomes a twist of a couple of degrees over the whole
+loop and no joint is worse than its neighbours (`opts.closeFrame: false` keeps
+the seam). A closed *flat* path has none of this, so nothing about a 2D sweep
+changed: the same path with a `z` on every point gives the same field, to the
+last bit, and the suite checks that too.
 
 ### Self-intersection is not a special case
 
@@ -373,9 +421,10 @@ Affordable for a mesher; the thing to watch for a raymarcher.
 ### What is exact
 
 At constant scale the result is a true distance: 1-Lipschitz, and it
-reproduces the analytic shapes — a circle along a line is a cylinder to 1e-9,
-a circle along a circle is `PRIMS.torus`, a swept torus meshes watertight
-within 0.4% of 2π²Rr².
+reproduces the analytic shapes — a circle along a line is a cylinder to 1e-9
+whichever way the line points, a circle along a circle is `PRIMS.torus` in
+whatever plane that circle lies in, a swept torus meshes watertight within
+0.4% of 2π²Rr².
 
 **Varying the scale makes it a bound rather than a distance**, and nothing
 puts that back: a tapered surface is slanted, and the profile's distance is
@@ -384,6 +433,11 @@ secant restores a *safe* bound — outside it never reports further than the
 truth, so a marcher cannot step through it; inside it under-reports depth by
 up to half a millimetre on a steep taper, which is the conservative
 direction.
+
+**Twisting costs the same**, and for the same reason — a rolled surface is
+slanted the other way about, so the two corrections go in together. Which
+means a closed path whose holonomy is being spread is a twisted sweep, and
+`f.exact` says so.
 
 ### Joins and caps
 
@@ -411,7 +465,7 @@ them. On a 120° corner with a 6 mm profile, material reached 0.05 mm past the
 vertex instead of 6.
 
 ```
-node check-sweep.mjs      # 43 assertions
+node check-sweep.mjs      # 78 assertions
 ```
 
 ## Inlining it into HTML

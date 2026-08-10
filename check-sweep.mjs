@@ -33,6 +33,8 @@ const load = (f) => { const m = { exports: {} };
 const SW = load('sweep.js');
 const SF = load('sinterform.js');
 const { Sketch } = load('sketch.js');
+const M3 = load('sketch3d.js');
+const { Sketch3D } = M3;
 const P = SW.PROFILES;
 
 let fail = 0;
@@ -435,6 +437,453 @@ console.log('\n--- and it meshes ---');
   ok(Math.abs(Math.abs(V) - want) / want < 0.02,
      `volume ${Math.abs(V).toFixed(0)} mm³ vs 2π²Rr² = ${want.toFixed(0)} `
      + `(${(100 * (Math.abs(V) - want) / want).toFixed(2)}%)`);
+}
+
+// ======================================================================
+console.log('\n--- a path through space ---');
+// The path stops being flat, and the only thing that really changes is that
+// the profile's orientation is no longer decided for it. Everything below is
+// about that: that the shapes with closed forms still come out, that the
+// frame is carried rather than computed, and that a flat path is untouched.
+const v3 = {
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                    a[0] * b[1] - a[1] * b[0]],
+  len: (a) => Math.hypot(a[0], a[1], a[2])
+};
+const unit3 = (a) => { const l = v3.len(a); return [a[0] / l, a[1] / l, a[2] / l]; };
+
+{
+  // a circle along a line that goes nowhere near an axis is still a cylinder
+  const a = [-20, -8, 3], b = [26, 14, 31], r = 5;
+  const f = SW.along([a, b], P.circle(r));
+  const d = v3.sub(b, a), L = v3.len(d), T = unit3(d);
+  let worst = 0;
+  for (let i = 0; i < 6000; i++) {
+    const p = [span(45), span(45), span(45)];
+    const w = v3.sub(p, a);
+    const proj = v3.dot(w, T);
+    const perp = v3.len(v3.sub(w, [T[0] * proj, T[1] * proj, T[2] * proj]));
+    const qa = perp - r, qb = Math.abs(proj - L / 2) - L / 2;
+    const exact = Math.min(Math.max(qa, qb), 0)
+                + Math.hypot(Math.max(qa, 0), Math.max(qb, 0));
+    worst = Math.max(worst, Math.abs(f(...p) - exact));
+  }
+  ok(worst < 1e-9, `a circle along a slanted line is a capped cylinder about it `
+     + `(worst ${worst.toExponential(1)} mm)`);
+  ok(f.exact, 'and it says it is exact');
+}
+{
+  // and a circle along a circle in a tilted plane is a torus in that plane
+  const rot = [0.5, -0.35, 0.8], Rr = 26, r = 5, N = 400;
+  const [u, v, nrm] = M3.frameOf(rot[0], rot[1], rot[2]);
+  const path = [];
+  for (let i = 0; i < N; i++) {
+    const th = i / N * 2 * Math.PI, c = Rr * Math.cos(th), s = Rr * Math.sin(th);
+    path.push([c * u[0] + s * v[0], c * u[1] + s * v[1], c * u[2] + s * v[2]]);
+  }
+  const f = SW.along(path, P.circle(r), { closed: true });
+  const sag = Rr * (1 - Math.cos(Math.PI / N));
+  let worst = 0;
+  for (let i = 0; i < 6000; i++) {
+    const p = [span(45), span(45), span(45)];
+    const h = v3.dot(p, nrm);
+    const inPlane = Math.hypot(v3.dot(p, u), v3.dot(p, v));
+    worst = Math.max(worst, Math.abs(f(...p) - (Math.hypot(inPlane - Rr, h) - r)));
+  }
+  ok(worst < sag * 1.6, `a circle along a tilted circle is a torus in that plane `
+     + `(worst ${worst.toFixed(4)} mm, sagitta ${sag.toFixed(4)})`);
+  near(f.holonomy, 0, 1e-12, 'and a flat loop brings its frame back unturned');
+}
+{
+  // The compatibility that matters: a flat path is what it always was. Same
+  // points with a z on them, same answers — not nearly, exactly.
+  const flat = [];
+  for (let i = 0; i <= 40; i++) {
+    const t = i / 40 * 4;
+    flat.push([12 * t - 20, 9 * Math.sin(t) + 0.4 * t * t]);
+  }
+  const lifted = flat.map(p => [p[0], p[1], 7]);
+  const A = SW.along(flat, P.rect(9, 4, 1), { z: 7, scale: (t) => 1 + t });
+  const B = SW.along(lifted, P.rect(9, 4, 1), { scale: (t) => 1 + t });
+  let worst = 0, worstFrame = 0;
+  for (let i = 0; i < 8000; i++) {
+    const p = [span(50), span(40), span(30)];
+    worst = Math.max(worst, Math.abs(A(...p) - B(...p)));
+  }
+  for (const fr of A.frames) worstFrame = Math.max(worstFrame, v3.len(v3.sub(fr.v, [0, 0, 1])));
+  ok(worst === 0, 'a two-coordinate path and the same path with a z are the same sweep');
+  ok(worstFrame < 1e-15, `and its frame keeps v on +Z the whole way `
+     + `(${worstFrame.toExponential(1)}), which is the frame this had before`);
+}
+{
+  // Why the frame is carried and not computed. The textbook answer is the
+  // Frenet normal, and it turns over at an inflection: the curvature changes
+  // sign and the normal follows it. Sweep anything that is not round with
+  // that and the section flips halfway along.
+  const tilt = 0.7, N = 160;
+  const path = [];
+  for (let i = 0; i <= N; i++) {
+    const t = i / N * 4 * Math.PI - 2 * Math.PI;
+    const x = t * 5, y = 14 * Math.sin(t);
+    path.push([x, y * Math.cos(tilt), y * Math.sin(tilt)]);   // an S-bend, tilted
+  }
+  const f = SW.along(path, P.rect(10, 3));
+  // the Frenet normal, discretely: which way the tangent is turning
+  let frenetFlips = 0, framesFlips = 0, worstStep = 0;
+  const T = f.frames.map(fr => fr.t);
+  let prevN = null;
+  for (let i = 1; i < T.length; i++) {
+    const dT = v3.sub(T[i], T[i - 1]);
+    if (v3.len(dT) < 1e-9) continue;
+    const n = unit3(dT);
+    if (prevN && v3.dot(n, prevN) < 0) frenetFlips++;
+    prevN = n;
+  }
+  // The frame may never turn further than the tangent made it: that is the
+  // whole content of "rotation-minimising", and it is what a Frenet frame
+  // breaks at an inflection, where the normal spins through 180° while the
+  // tangent barely moves.
+  let excess = 0;
+  for (let i = 1; i < f.frames.length; i++) {
+    const d = v3.dot(f.frames[i].u, f.frames[i - 1].u);
+    if (d < 0) framesFlips++;
+    const turned = Math.acos(Math.min(1, Math.max(-1, d)));
+    const tangentTurned = Math.acos(Math.min(1, Math.max(-1, v3.dot(T[i], T[i - 1]))));
+    worstStep = Math.max(worstStep, turned);
+    excess = Math.max(excess, turned - tangentTurned);
+  }
+  ok(frenetFlips >= 2, `the Frenet normal turns over ${frenetFlips} times on an S-bend`);
+  ok(framesFlips === 0, 'and the carried frame turns over none');
+  ok(excess < 1e-9, `the frame never turns further than the tangent made it `
+     + `(worst excess ${excess.toExponential(1)} rad over ${(worstStep * 180 / Math.PI).toFixed(1)}° joints)`);
+  // the frame is a frame: orthonormal, right-handed, square to the path
+  let bad = 0;
+  for (const fr of f.frames) {
+    const e = Math.max(Math.abs(v3.dot(fr.u, fr.v)), Math.abs(v3.dot(fr.u, fr.t)),
+                       Math.abs(v3.dot(fr.v, fr.t)), Math.abs(v3.len(fr.u) - 1),
+                       Math.abs(v3.len(fr.v) - 1),
+                       v3.len(v3.sub(v3.cross(fr.u, fr.v), fr.t)));
+    if (e > 1e-12) bad++;
+  }
+  ok(bad === 0, 'every frame is orthonormal, right-handed and square to the tangent');
+}
+{
+  // A closed path in space need not bring its frame back. That is the sphere's
+  // doing, not the code's: the frame comes back turned by the area the tangent
+  // traced out, so a mirror-symmetric loop traces half a sphere and comes back
+  // unturned, and one without that symmetry does not.
+  const ring = (fn, n) => { const p = []; for (let i = 0; i < n; i++) p.push(fn(i / n * 2 * Math.PI)); return p; };
+  const flat = ring((t) => [30 * Math.cos(t), 30 * Math.sin(t), 0], 240);
+  const mirrored = ring((t) => [30 * Math.cos(t), 30 * Math.sin(t), 10 * Math.sin(2 * t)], 240);
+  const asym = ring((t) => [30 * Math.cos(t) + 4 * Math.sin(2 * t),
+                            26 * Math.sin(t) + 5 * Math.cos(3 * t + 1.1),
+                            11 * Math.sin(t + 0.4) + 6 * Math.sin(2 * t + 2.2)], 240);
+  near(SW.along(flat, P.rect(8, 3), { closed: true }).holonomy, 0, 1e-12,
+       'a flat closed loop has no holonomy');
+  near(SW.along(mirrored, P.rect(8, 3), { closed: true }).holonomy, 0, 1e-9,
+       'nor does a saddle with a mirror plane');
+  const spread = SW.along(asym, P.rect(10, 4), { closed: true });
+  const seamed = SW.along(asym, P.rect(10, 4), { closed: true, closeFrame: false });
+  ok(Math.abs(spread.holonomy) > 0.01,
+     `a loop without that symmetry comes back turned by `
+     + `${(spread.holonomy * 180 / Math.PI).toFixed(2)}°`);
+  ok(spread.holonomy === seamed.holonomy, 'measured the same either way — it is the path’s, not a setting');
+
+  // Carry the frame across the closing joint by hand and see what is left.
+  const across = (f) => {
+    const a = f.frames[f.frames.length - 1], b = f.frames[0];
+    const ax = v3.cross(a.t, b.t), s = v3.len(ax), c = v3.dot(a.t, b.t);
+    let u = a.u;
+    if (s > 1e-12) {
+      const k = [ax[0] / s, ax[1] / s, ax[2] / s], th = Math.atan2(s, c);
+      const kv = v3.cross(k, u), d = v3.dot(k, u) * (1 - Math.cos(th));
+      u = [u[0] * Math.cos(th) + kv[0] * Math.sin(th) + k[0] * d,
+           u[1] * Math.cos(th) + kv[1] * Math.sin(th) + k[1] * d,
+           u[2] * Math.cos(th) + kv[2] * Math.sin(th) + k[2] * d];
+    }
+    return Math.abs(Math.atan2(v3.dot(u, b.v), v3.dot(u, b.u)));
+  };
+  const perJoint = Math.abs(spread.holonomy) / spread.segments;
+  ok(across(seamed) > 10 * perJoint,
+     `left alone it is a seam at one station (${(across(seamed) * 180 / Math.PI).toFixed(3)}°)`);
+  ok(across(spread) < 3 * perJoint,
+     `spread along the path the seam is no worse than any other joint `
+     + `(${(across(spread) * 180 / Math.PI).toFixed(3)}° against ${(perJoint * 180 / Math.PI).toFixed(3)}°)`);
+  ok(!spread.exact && seamed.exact,
+     'and spreading it is a twist, so that one stops claiming to be exact');
+}
+{
+  // The scale varies in space exactly as it did in the plane -- it is a
+  // property of how far along the path you are, and the path stopped being
+  // flat, not the profile. Compared against the kernel's own cone, measured in
+  // the frame of a line that points nowhere near an axis.
+  const r0 = 3, r1 = 15, L = 50;
+  const a = [-14, -9, 5], b = [12, 11, 43];
+  const axis = unit3(v3.sub(b, a));
+  const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+  const len = v3.len(v3.sub(b, a));
+  const A = [a, [a[0] + axis[0] * L, a[1] + axis[1] * L, a[2] + axis[2] * L]];
+  const m = [(A[0][0] + A[1][0]) / 2, (A[0][1] + A[1][1]) / 2, (A[0][2] + A[1][2]) / 2];
+  void mid; void len;
+  const f = SW.along(A, P.circle(1), { scale: (t) => r0 + (r1 - r0) * t });
+  // the cone runs along +Z in its own frame, so measure the point in the
+  // path's frame and hand that over
+  const [U0, V0] = [f.frames[0].u, f.frames[0].v];
+  const cone = (x, y, z) => {
+    const w = [x - m[0], y - m[1], z - m[2]];
+    return SF.PRIMS.cone.js([v3.dot(w, U0), v3.dot(w, V0), v3.dot(w, axis)], [r0, r1, L], 0);
+  };
+  let worst = 0, unsafe = 0, worstShallow = 0;
+  for (let i = 0; i < 40000; i++) {
+    const p = [m[0] + span(34), m[1] + span(34), m[2] + span(38)];
+    const got = f(...p), truth = cone(...p);
+    worst = Math.max(worst, Math.abs(got - truth));
+    if (truth > 0 && got > truth + 1e-6) unsafe++;
+    if (truth < 0 && got > truth) worstShallow = Math.max(worstShallow, got - truth);
+  }
+  ok(worst < 1.2, `rising scale along a slanted line is the kernel's cone, in that `
+     + `direction (worst gap ${worst.toFixed(3)} mm)`);
+  ok(unsafe === 0, 'outside, it never reports further than the truth — same as in the plane');
+  ok(worstShallow < 0.5, `inside, it under-reports depth by at most `
+     + `${worstShallow.toFixed(3)} mm, which is the conservative direction`);
+  ok(!f.exact, 'and a tapered sweep through space does not claim to be exact');
+  const L2 = lipschitz(f, 36, 30000);
+  ok(L2 <= 1.002, `the tapered field is 1-Lipschitz off-axis too (${L2.toFixed(4)})`);
+}
+{
+  // the same three ways of saying it, on a path that climbs
+  const path = [], turns = 2.2, Rh = 15, pitch = 30;
+  for (let i = 0; i <= 240; i++) {
+    const t = i / 240 * turns * 2 * Math.PI;
+    path.push([Rh * Math.cos(t), Rh * Math.sin(t), pitch * t / (2 * Math.PI)]);
+  }
+  const r = 3;
+  const byFn = SW.along(path, P.circle(r), { scale: (t) => 0.5 + 1.8 * t });
+  const byArr = SW.along(path, P.circle(r), { scale: path.map((_, i) => 0.5 + 1.8 * i / (path.length - 1)) });
+  const flat = SW.along(path, P.circle(r), { scale: 1.7 });
+  // on the path itself, the material is one scaled profile deep -- less the
+  // taper's own conservatism, which is what makes this a bound
+  let worstFn = 0, worstArr = 0;
+  for (let i = 1; i < path.length - 1; i += 7) {
+    const t = i / (path.length - 1), want = -r * (0.5 + 1.8 * t);
+    worstFn = Math.max(worstFn, Math.abs(byFn(...path[i]) - want));
+    worstArr = Math.max(worstArr, Math.abs(byArr(...path[i]) - want));
+  }
+  ok(worstFn < 0.1, `a tapered helix is its scaled profile deep all the way along `
+     + `(worst ${worstFn.toFixed(4)} mm)`);
+  ok(worstArr < 0.1, 'and one factor per path point says the same thing');
+  ok(!byFn.exact && !byArr.exact && flat.exact,
+     'a constant scale stays exact; a varying one does not');
+  const grew = byFn.bounds.hi[2] - flat.bounds.hi[2];
+  ok(grew > 0, `the bounds follow the largest scale, not the first (${grew.toFixed(1)} mm taller)`);
+  const L3 = lipschitz(byFn, 55, 30000);
+  ok(L3 <= 1.002, `and it stays 1-Lipschitz (${L3.toFixed(4)})`);
+
+  // taper and twist at once: the two slants are at right angles and both are
+  // divided out, so the bound survives having both
+  const both = SW.along(path, P.rect(9, 4), { scale: (t) => 0.6 + 1.4 * t, twist: Math.PI });
+  const L4 = lipschitz(both, 55, 30000);
+  ok(L4 <= 1.002, `a sweep that tapers and twists at once is still 1-Lipschitz (${L4.toFixed(4)})`);
+}
+{
+  // end to end: a tapered sweep along a path solved in space, meshed, and
+  // measured against the volume a truncated cone has
+  const S = new Sketch3D();
+  const a = S.point(0, 0, 0, { fixed: true });
+  const b = S.point(30, 12, 26);
+  const ln = S.line(a, b);
+  S.constrain('distance', { p: a }, { p: b }, 50);
+  ok(S.solve().converged, 'a dimensioned line in space solves');
+  const r0 = 2.5, r1 = 8, len = 50;
+  const f = SW.fromSketch(S, { entity: ln }, P.circle(1), { scale: (t) => r0 + (r1 - r0) * t });
+
+  // The same solid out of the kernel, in the same slanted frame. It is here as
+  // a control: a cone standing on +Z meshes watertight, and the same cone
+  // tilted does not quite, because surfaceNets leaves a few unpaired edges
+  // wherever a sharp edge crosses the grid at an angle. Meshing both says
+  // whether that is the field's doing or the mesher's.
+  const A0 = S.posOf({ p: a }), axis = unit3(v3.sub(S.posOf({ p: b }), A0));
+  const mid = [A0[0] + axis[0] * len / 2, A0[1] + axis[1] * len / 2, A0[2] + axis[2] * len / 2];
+  const [U0, V0] = [f.frames[0].u, f.frames[0].v];
+  const cone = (x, y, z) => {
+    const w = [x - mid[0], y - mid[1], z - mid[2]];
+    return SF.PRIMS.cone.js([v3.dot(w, U0), v3.dot(w, V0), v3.dot(w, axis)], [r0, r1, len], 0);
+  };
+
+  const meshed = (g) => {
+    const res = 0.55, pad = 2 * res;
+    const lo = f.bounds.lo.map(c => c - pad), hi = f.bounds.hi.map(c => c + pad);
+    const n = [0, 1, 2].map(i => Math.ceil((hi[i] - lo[i]) / res) + 1);
+    const vol = new Float32Array(n[0] * n[1] * n[2]);
+    let idx = 0;
+    for (let i = 0; i < n[0]; i++)
+      for (let j = 0; j < n[1]; j++)
+        for (let k = 0; k < n[2]; k++)
+          vol[idx++] = g(lo[0] + i * res, lo[1] + j * res, lo[2] + k * res);
+    const mesh = SF.surfaceNets(vol, n[0], n[1], n[2], lo[0], lo[1], lo[2], res);
+    const nt = mesh.indices.length / 3, edges = new Map();
+    for (let t = 0; t < nt; t++) {
+      const A = mesh.indices[3 * t], B = mesh.indices[3 * t + 1], C = mesh.indices[3 * t + 2];
+      for (const [x, y] of [[A, B], [B, C], [C, A]]) {
+        const key = x < y ? `${x}_${y}` : `${y}_${x}`;
+        edges.set(key, (edges.get(key) || 0) + 1);
+      }
+    }
+    let bad = 0;
+    for (const c of edges.values()) if (c !== 2) bad++;
+    const Q = mesh.positions;
+    let V = 0;
+    for (let t = 0; t < nt; t++) {
+      const x = 3 * mesh.indices[3 * t], y = 3 * mesh.indices[3 * t + 1], z = 3 * mesh.indices[3 * t + 2];
+      V += (Q[x] * (Q[y + 1] * Q[z + 2] - Q[y + 2] * Q[z + 1])
+          - Q[x + 1] * (Q[y] * Q[z + 2] - Q[y + 2] * Q[z])
+          + Q[x + 2] * (Q[y] * Q[z + 1] - Q[y + 1] * Q[z])) / 6;
+    }
+    return { nt, bad, volume: Math.abs(V) };
+  };
+  const mine = meshed(f), theirs = meshed(cone);
+  const want = Math.PI * len * (r0 * r0 + r0 * r1 + r1 * r1) / 3;
+  ok(mine.nt > 1000, `the tapered sweep meshes (${mine.nt.toLocaleString()} triangles)`);
+  ok(Math.abs(mine.volume - want) / want < 0.03,
+     `and holds ${mine.volume.toFixed(0)} mm³ against πL(r0² + r0r1 + r1²)/3 = ${want.toFixed(0)}`);
+  ok(Math.abs(mine.volume - theirs.volume) / want < 0.02,
+     `within ${(100 * Math.abs(mine.volume - theirs.volume) / want).toFixed(2)}% of the kernel's `
+     + 'own cone meshed in the same frame');
+  ok(mine.bad <= theirs.bad + 2,
+     `and no less watertight than that cone is — ${mine.bad} unpaired edges against its `
+     + `${theirs.bad}, which is the mesher on a slanted sharp edge, not the field`);
+}
+{
+  // Twist, which the frame makes almost free: roll the section as it goes.
+  const turn = Math.PI / 2;
+  const f = SW.along([[0, 0, 0], [60, 0, 0]], P.rect(14, 4), { twist: turn });
+  // the section is 14 across and 4 up at the start, and turned a quarter at the end
+  ok(f(2, 6, 0) < 0 && f(2, 0, 3) > 0, 'at the start the section lies flat');
+  ok(f(58, 0, 6) < 0 && f(58, 3, 0) > 0, 'at the end it stands on edge');
+  ok(!f.exact, 'a twisted sweep is a bound, not a distance — and says so');
+  const L = lipschitz(f, 40, 30000);
+  ok(L <= 1.002, `and the bound is still 1-Lipschitz (${L.toFixed(4)}), so a marcher holds`);
+}
+{
+  // a helix: the case a flat sweep cannot express at all
+  const path = [], turns = 2.5, Rh = 16, pitch = 34;
+  for (let i = 0; i <= 300; i++) {
+    const t = i / 300 * turns * 2 * Math.PI;
+    path.push([Rh * Math.cos(t), Rh * Math.sin(t), pitch * t / (2 * Math.PI)]);
+  }
+  const r = 4;
+  const f = SW.along(path, P.circle(r));
+  const L = lipschitz(f, 60, 30000);
+  ok(L <= 1.002, `a helical sweep is 1-Lipschitz (${L.toFixed(4)})`);
+  // it meshes, and it holds about arc length x profile area
+  const res = 0.9, pad = 2 * res;
+  const lo = f.bounds.lo.map(c => c - pad), hi = f.bounds.hi.map(c => c + pad);
+  const n = [0, 1, 2].map(i => Math.ceil((hi[i] - lo[i]) / res) + 1);
+  const vol = new Float32Array(n[0] * n[1] * n[2]);
+  let idx = 0;
+  for (let i = 0; i < n[0]; i++)
+    for (let j = 0; j < n[1]; j++)
+      for (let k = 0; k < n[2]; k++)
+        vol[idx++] = f(lo[0] + i * res, lo[1] + j * res, lo[2] + k * res);
+  const mesh = SF.surfaceNets(vol, n[0], n[1], n[2], lo[0], lo[1], lo[2], res);
+  const nt = mesh.indices.length / 3;
+  const edges = new Map();
+  for (let t = 0; t < nt; t++) {
+    const A = mesh.indices[3 * t], B = mesh.indices[3 * t + 1], C = mesh.indices[3 * t + 2];
+    for (const [x, y] of [[A, B], [B, C], [C, A]]) {
+      const key = x < y ? `${x}_${y}` : `${y}_${x}`;
+      edges.set(key, (edges.get(key) || 0) + 1);
+    }
+  }
+  let bad = 0;
+  for (const c of edges.values()) if (c !== 2) bad++;
+  ok(nt > 1000 && bad === 0, `it meshes watertight (${nt.toLocaleString()} triangles)`);
+  const Q = mesh.positions;
+  let V = 0;
+  for (let t = 0; t < nt; t++) {
+    const a = 3 * mesh.indices[3 * t], b = 3 * mesh.indices[3 * t + 1], c = 3 * mesh.indices[3 * t + 2];
+    V += (Q[a] * (Q[b + 1] * Q[c + 2] - Q[b + 2] * Q[c + 1])
+        - Q[a + 1] * (Q[b] * Q[c + 2] - Q[b + 2] * Q[c])
+        + Q[a + 2] * (Q[b] * Q[c + 1] - Q[b + 1] * Q[c])) / 6;
+  }
+  const want = f.arcLength * Math.PI * r * r + (4 / 3) * Math.PI * r * r * r - 2 * (Math.PI * r * r * r / 3);
+  ok(Math.abs(Math.abs(V) - want) / want < 0.05,
+     `and holds ${Math.abs(V).toFixed(0)} mm³ against arc length × πr² ≈ ${want.toFixed(0)}`);
+  // and nothing escapes the bounds
+  let escaped = 0;
+  for (let i = 0; i < 20000; i++) {
+    const p = [span(70), span(70), span(70)];
+    if (f(...p) < 0 && [0, 1, 2].some(k => p[k] < f.bounds.lo[k] || p[k] > f.bounds.hi[k])) escaped++;
+  }
+  ok(escaped === 0, 'and its bounds contain it');
+}
+
+// ======================================================================
+console.log('\n--- along a 3D sketch ---');
+{
+  // the same door sketch.js came through, one dimension up
+  const S = new Sketch3D();
+  const a = S.point(-30, -20, 2, { fixed: true }), b = S.point(4, -14, -3);
+  const l1 = S.line(a, b);
+  const cc = S.point(4, 2, 1);
+  const el = S.arc(cc, 15, 11, [0.2, 0.1, 0], -Math.PI / 2, Math.PI / 2);
+  const l2 = S.line(S.point(3, 20, 1), S.point(-14, 22, 18));
+  S.constrain('coincident', { e: l1, end: 1 }, { e: el, end: 0 });
+  S.constrain('parallel', { e: l1, end: 1 }, { e: el, end: 0 });
+  S.constrain('coincident', { e: el, end: 1 }, { e: l2, end: 0 });
+  S.constrain('circular', el);
+  S.constrain('radius', el, undefined, 18);
+  S.constrain('horizontal', { e: l1 });
+  S.constrain('distance', { p: a }, { p: b }, 34);
+  for (const t of [0, Math.PI / 2])
+    S.constrain('horizontal', { e: el, t: S.param(t, { fixed: true }) });
+  ok(S.solve().converged, 'a 3D sketch solves, and then it is a path');
+
+  const f = SW.fromSketch(S, { entity: el }, P.rect(8, 3));
+  ok(f.segments > 10 && f.arcLength > 40,
+     `sweeping one of its arcs gives ${f.segments} segments over ${f.arcLength.toFixed(1)} mm`);
+  const mid = S.evalAt(S.x, el, 0);
+  ok(f(mid[0], mid[1], mid[2]) < 0 || f(...S.posOf({ e: el, t: S.param(0) })) < 0,
+     'and the path itself is inside the material');
+
+  // a spline in space, which is the shape a flat sweep has no way to express
+  const cs = [S.point(-40, 30, 0), S.point(-10, 46, 18), S.point(24, 24, -6),
+              S.point(48, 44, 20)];
+  const nb = S.nurbs(cs, { degree: 3 });
+  const g = SW.fromSketch(S, { entity: nb }, P.circle(4));
+  ok(g.segments > 20, `and a NURBS in space sweeps too (${g.segments} segments)`);
+  ok(!g.frames.some((fr, i) => i && v3.dot(fr.u, g.frames[i - 1].u) < 0),
+     'without the section turning over anywhere along it');
+}
+{
+  // a face's boundary, from the 3D profile
+  const rot = [0.3, -0.4, 0.7], W = 40, H = 25;
+  const S = new Sketch3D();
+  const [u, v] = M3.frameOf(rot[0], rot[1], rot[2]);
+  const at = (A, B) => S.point(u[0] * A + v[0] * B, u[1] * A + v[1] * B, u[2] * A + v[2] * B);
+  const c = [at(0, 0), at(W, 0), at(W, H), at(0, H)];
+  S.line(c[0], c[1]); S.line(c[1], c[2]); S.line(c[2], c[3]); S.line(c[3], c[0]);
+  const f = SW.fromSketch(S, { face: 0 }, P.circle(3));
+  near(f.arcLength, 2 * (W + H), 1e-6, 'a tilted face’s boundary sweeps at its own perimeter');
+  near(f.holonomy, 0, 1e-12, 'and being flat, its frame comes back unturned');
+  // the corners of the plate are inside the bead
+  let outside = 0;
+  for (const p of [c[0], c[1], c[2], c[3]].map(id => S.posOf({ p: id })))
+    if (f(...p) > -2.9) outside++;
+  ok(outside === 0, 'every corner of it is a bead radius deep in the material');
+
+  // the two sketchers report a profile differently, and asking the wrong one
+  // for a face has to say so rather than reading undefined
+  const flat = new Sketch();
+  const p0 = flat.point(0, 0), p1 = flat.point(20, 0), p2 = flat.point(20, 20), p3 = flat.point(0, 20);
+  flat.line(p0, p1); flat.line(p1, p2); flat.line(p2, p3); flat.line(p3, p0);
+  let msg = '';
+  try { SW.fromSketch(flat, { face: 0 }, P.circle(2)); } catch (e) { msg = e.message; }
+  ok(msg.indexOf('3D sketch') >= 0, `a 2D sketch asked for a face says so: ${msg}`);
+  const l = SW.fromSketch(flat, { loop: 0 }, P.circle(2));
+  near(l.arcLength, 80, 1e-6, 'and { loop } still means what it always did');
 }
 
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);
