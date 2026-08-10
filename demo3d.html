@@ -162,9 +162,11 @@ footer { border-top: 1px solid var(--line); padding-top: 14px; color: #5b6472;
 footer b { color: var(--dim); font-weight: 400; }
 
 @media (max-width: 900px) {
-  .rig { grid-template-columns: 1fr; }
+  /* minmax(0,1fr), not 1fr: a bare 1fr track is floored at min-content, so the
+     code block would push the page sideways instead of scrolling inside itself */
+  .rig { grid-template-columns: minmax(0, 1fr); }
   .stage { min-height: 58vh; }
-  .read { grid-template-columns: 1fr; }
+  .read { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
