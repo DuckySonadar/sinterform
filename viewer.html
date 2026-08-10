@@ -12,7 +12,11 @@
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
               font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; overflow:hidden; }
-  #wrap { display:flex; height:100%; }
+  /* The dynamic viewport unit rather than a percentage inherited from
+     html/body: it is right on a phone with retracting browser chrome, and
+     it holds when this page is embedded in something with its own idea of
+     how tall a body is. The percentage stays as the fallback. */
+  #wrap { display:flex; height:100%; height:100dvh; }
   /* flex-basis 0 with min-width 0, so the canvas's own width/height
      attributes never feed back into layout — set them and the element grows,
      which grows the rect, which grows them again. */
@@ -235,8 +239,19 @@ const SCENES = {
 };
 
 const cv = document.getElementById('view');
-const V = SinterView.attach(cv);
 const $ = id => document.getElementById(id);
+let V;
+try {
+  V = SinterView.attach(cv);
+} catch (e) {
+  // Without WebGL2 there is nothing to draw, and throwing here would leave the
+  // panel half built and the scene list empty -- which reads as a broken page
+  // rather than as an unsupported one.
+  $('err').style.display = 'block';
+  $('err').textContent = String(e.message || e) + ' — this page needs WebGL2.';
+  $('stat').textContent = 'no context';
+  throw e;
+}
 
 function size() {
   const r = cv.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
