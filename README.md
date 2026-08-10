@@ -146,6 +146,16 @@ position of sample `(0,0,0)` and `res` the spacing, all mm. Returns a
 cell-to-vertex map is kept sparse — at print resolution a dense one costs
 hundreds of megabytes to hold the ~1% of cells the surface crosses.
 
+**Triangles are wound so that `cross(b − a, c − a)` points out of the solid** —
+what STL means by a facet normal, and what anything shading or back-face
+culling the mesh will assume. They used to come out the other way round on
+every triangle, and nothing fell over: slicers flood-fill orientation
+themselves so the prints were fine, the viewer's mesh mode lit every surface
+from the side facing away without looking obviously broken, and every volume
+in these suites is measured through an `abs()`. `check-kernel.mjs` now tests
+the winding against the gradient of the distance field, which points out of
+the solid by definition.
+
 ```js
 meshToSTL(mesh, header) → Blob
 ```

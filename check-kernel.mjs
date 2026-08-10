@@ -150,6 +150,70 @@ ok(SF.PRIM_KEYS.length >= 8, `${SF.PRIM_KEYS.length} primitives registered`);
 ok(typeof SF.surfaceNets === 'function' && typeof SF.meshToSTL === 'function',
    'mesher and STL writer are exported');
 
+// Which way the triangles face.
+//
+// This is the one that hid for a long time, because nothing downstream falls
+// over when it is wrong. A slicer flood-fills orientation itself, so the
+// prints came out; the viewer builds its vertex normals straight from the
+// winding, so it lit every surface from the side facing away and looked
+// merely odd; and every volume in these suites is measured through an
+// absolute value, which is exactly the sort of abs() that swallows a sign
+// nobody is checking.
+//
+// The test is against the distance field itself rather than against a
+// particular shape: the gradient of a signed distance points *out* of the
+// solid everywhere, so the triangles must too.
+{
+  const R = 10, res = 0.7, pad = 2 * res;   // `sphere` above is r = 10
+  const lo = [-R - pad, -R - pad, -R - pad], hi = [R + pad, R + pad, R + pad];
+  const n = [0, 1, 2].map(i => Math.ceil((hi[i] - lo[i]) / res) + 1);
+  const vol = new Float32Array(n[0] * n[1] * n[2]);
+  let w = 0;
+  for (let i = 0; i < n[0]; i++)
+    for (let j = 0; j < n[1]; j++)
+      for (let k = 0; k < n[2]; k++)
+        vol[w++] = SF.sceneSDF(sphere, lo[0] + i * res, lo[1] + j * res, lo[2] + k * res);
+  const mesh = SF.surfaceNets(vol, n[0], n[1], n[2], lo[0], lo[1], lo[2], res);
+  const P = mesh.positions, I = mesh.indices, nt = I.length / 3;
+  const grad = (x, y, z) => {
+    const h = 1e-4, f = (a, b, c) => SF.sceneSDF(sphere, a, b, c);
+    return [f(x + h, y, z) - f(x - h, y, z),
+            f(x, y + h, z) - f(x, y - h, z),
+            f(x, y, z + h) - f(x, y, z - h)];
+  };
+  let against = 0, V = 0, stlWrong = 0;
+  const normals = [];
+  for (let t = 0; t < nt; t++) {
+    const a = 3 * I[3 * t], b = 3 * I[3 * t + 1], c = 3 * I[3 * t + 2];
+    const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
+    const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    normals.push([nx, ny, nz]);
+    const g = grad((P[a] + P[b] + P[c]) / 3, (P[a + 1] + P[b + 1] + P[c + 1]) / 3,
+                   (P[a + 2] + P[b + 2] + P[c + 2]) / 3);
+    if (nx * g[0] + ny * g[1] + nz * g[2] <= 0) against++;
+    V += (P[a] * (P[b + 1] * P[c + 2] - P[b + 2] * P[c + 1])
+        - P[a + 1] * (P[b] * P[c + 2] - P[b + 2] * P[c])
+        + P[a + 2] * (P[b] * P[c + 1] - P[b + 1] * P[c])) / 6;
+  }
+  ok(nt > 500 && against === 0,
+     `every one of ${nt.toLocaleString()} triangles is wound to face out of the solid`);
+  ok(V > 0, `so the signed volume comes out positive: ${V.toFixed(0)} mm³ `
+     + `(a r=${R} sphere holds ${(4 / 3 * Math.PI * R ** 3).toFixed(0)})`);
+
+  // and the STL agrees with itself: the facet normal it writes is the one its
+  // own three vertices imply, which is what the format asks for
+  const bytes = new DataView(await SF.meshToSTL(mesh, 'winding check').arrayBuffer());
+  for (let t = 0; t < nt; t++) {
+    const o = 84 + t * 50;
+    const fn = [bytes.getFloat32(o, true), bytes.getFloat32(o + 4, true),
+                bytes.getFloat32(o + 8, true)];
+    const m = normals[t], L = Math.hypot(m[0], m[1], m[2]) || 1;
+    if (fn[0] * m[0] / L + fn[1] * m[1] / L + fn[2] * m[2] / L < 0.99) stlWrong++;
+  }
+  ok(stlWrong === 0, 'and the STL writes a facet normal that matches its own winding');
+}
+
 // `fields` is a getter/setter pair, not a value. The application replaces the
 // whole array on load and on import; if the kernel handed out a copied
 // reference the two would drift, and the symptom -- a baked shape rendering

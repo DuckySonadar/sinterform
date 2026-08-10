@@ -682,8 +682,11 @@ function prepare(raw) {
     cen[3 * t] = (P[a] + P[b] + P[c]) / 3;
     cen[3 * t + 1] = (P[a + 1] + P[b + 1] + P[c + 1]) / 3;
     cen[3 * t + 2] = (P[a + 2] + P[b + 2] + P[c + 2]) / 3;
-    const lam = Math.abs(nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
-    shade[t] = Math.max(0, Math.min(23, Math.round(lam * 23)));
+    // surfaceNets winds its triangles to face out of the solid, so this is a
+    // real one-sided lambert and not the two-sided abs() that a mesh of
+    // unknown orientation forces on you
+    const lam = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+    shade[t] = Math.max(0, Math.min(23, Math.round((0.16 + 0.84 * lam) * 23)));
   }
   return { P, tri, nt, shade, nrm, cen, order: new Uint32Array(nt), depth: new Float32Array(nt) };
 }
@@ -795,6 +798,8 @@ function drawMesh(m) {
   for (let t = 0; t < nt; t++) {
     const cx = m.cen[3 * t] - V.eye[0], cy = m.cen[3 * t + 1] - V.eye[1],
           cz = m.cen[3 * t + 2] - V.eye[2];
+    // wound outward, so a triangle whose normal agrees with the view direction
+    // is one being looked at from behind
     if (m.nrm[3 * t] * cx + m.nrm[3 * t + 1] * cy + m.nrm[3 * t + 2] * cz > 0) continue;
     const d = cx * V.fwd[0] + cy * V.fwd[1] + cz * V.fwd[2];
     if (d < 4) continue;

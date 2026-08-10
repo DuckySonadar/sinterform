@@ -498,9 +498,16 @@ function surfaceNets(vol, nx, ny, nz, ox, oy, oz, res) {
         }
       }
   const tris = [];
+  // Wound so that cross(b - a, c - a) points *out* of the solid, which is what
+  // the STL format means by a facet normal and what anything shading or
+  // back-face culling this mesh will assume. It used to come out the other way
+  // round on every triangle: slicers flood-fill orientation themselves so the
+  // prints were fine, and the viewer lit every surface from the wrong side
+  // without ever looking obviously broken. `flip` follows the sign of the
+  // sample the crossing edge leaves behind.
   function quad(a, b, c, d2, flip) {
     if (a < 0 || b < 0 || c < 0 || d2 < 0) return;
-    if (flip) tris.push(a, c, b, a, d2, c); else tris.push(a, b, c, a, c, d2);
+    if (flip) tris.push(a, b, c, a, c, d2); else tris.push(a, c, b, a, d2, c);
   }
   for (let i = 0; i < nx; i++)
     for (let j = 0; j < ny; j++)
