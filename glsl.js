@@ -157,6 +157,14 @@ const GLSL = {
 }` },
   plane: { fn: 'pPlane',
     src: 'float pPlane(vec3 p, vec3 d, float r){ return p.z; }' },
+  // The odd one out twice over. It takes a sampler, which `call` knows about
+  // -- and it takes the field's **range** through the slot every other
+  // primitive uses for its corner rounding, because a baked field has no
+  // rounding and the range has to arrive somehow. The JS twin reads that off
+  // the field object instead, so nothing in a plan carries it and a consumer
+  // has to know to pack it. Pack `round` there by mistake and the sample comes
+  // back multiplied by zero: max(0, box), which draws as the bounding box and
+  // looks exactly like a texture that never arrived.
   field: { fn: 'pFieldS', sampler: true,
     src: `float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
   vec3 q = abs(p) - d;

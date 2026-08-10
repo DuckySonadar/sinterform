@@ -284,15 +284,68 @@ void main(){
       uData[b + 4] = (n.r[0] || 0) * SF.RAD;
       uData[b + 5] = (n.r[1] || 0) * SF.RAD;
       uData[b + 6] = (n.r[2] || 0) * SF.RAD;
-      uData[b + 7] = n.round || 0;
+      // A baked field has no rounding, and its GLSL twin takes the *range* --
+      // the millimetres one byte of sample spans -- through that slot instead.
+      // The JS twin reads it off the field object, so nothing in the plan
+      // carries it and a consumer that packs `round` here gets a field that
+      // reads zero everywhere: max(0, box), which draws as the bounding box
+      // and looks like the texture never arrived.
+      uData[b + 7] = n.t === 'field'
+        ? (((SF.fields || [])[n.fi | 0] || { range: 0 }).range || 0)
+        : (n.round || 0);
       uData[b + 8] = n.d[0]; uData[b + 9] = n.d[1] || 0; uData[b + 10] = n.d[2] || 0;
     }
+  }
+
+  // ---- baked fields ----------------------------------------------------
+  // The consumer's half of the `field` primitive. The kernel holds the
+  // samples, glsl.js declares the samplers and reads them back, and somebody
+  // has to put the one into the other -- that somebody is whoever owns the GL
+  // context, which is this file.
+  //
+  // The grid is stored z-fastest, so the texture is nz wide by ny by nx, and
+  // glsl.js looks it up as uvw.zyx to match. Trilinear filtering and clamped
+  // edges are not a choice: they are what sampleField does in JS, and the two
+  // have to be the same shape.
+  const texes = new Map();
+  function texOf(f) {
+    if (!f || !f.data) return null;
+    let t = texes.get(f);
+    if (t) return t;
+    t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_3D, t);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, f.nz, f.ny, f.nx, 0,
+                  gl.RED, gl.UNSIGNED_BYTE, f.data);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    for (const w of ['TEXTURE_WRAP_S', 'TEXTURE_WRAP_T', 'TEXTURE_WRAP_R'])
+      gl.texParameteri(gl.TEXTURE_3D, gl[w], gl.CLAMP_TO_EDGE);
+    texes.set(f, t);
+    return t;
+  }
+  function bindFields() {
+    const fs = SF.fields || [];
+    for (let i = 0; i < MAXFIELDS; i++) {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_3D, texOf(fs[i]));
+      const u = uni['uField' + i];
+      if (u) gl.uniform1i(u, i);
+    }
+  }
+  // A scene replaces the whole array when it loads, so anything not in it any
+  // more is never coming back.
+  function dropStaleTextures() {
+    const live = new Set(SF.fields || []);
+    for (const [f, t] of texes)
+      if (!live.has(f)) { gl.deleteTexture(t); texes.delete(f); }
   }
 
   let at = new Map();
   function rebuild() {
     view.lastError = null;
     try {
+      dropStaleTextures();
       const { src, at: a } = fragSource(view.plan);
       prog = link(VS, src);
       at = a;
@@ -300,6 +353,8 @@ void main(){
       for (const k of ['uRes', 'uEye', 'uCam', 'uFocal', 'uTint', 'uHit', 'uFlat'])
         uni[k] = gl.getUniformLocation(prog, k);
       uni.uD = gl.getUniformLocation(prog, 'uD[0]');
+      for (let i = 0; i < MAXFIELDS; i++)
+        uni['uField' + i] = gl.getUniformLocation(prog, 'uField' + i);
     } catch (e) { view.lastError = String(e.message || e); }
     if (view.mode === 'mesh') { try { buildMesh(); } catch (e) { view.lastError = String(e.message || e); } }
   }
@@ -340,6 +395,7 @@ void main(){
     gl.disable(gl.DEPTH_TEST);
     gl.useProgram(prog);
     upload(at);
+    bindFields();
     gl.uniform2f(uni.uRes, w, h);
     gl.uniform3f(uni.uEye, C.eye[0], C.eye[1], C.eye[2]);
     gl.uniformMatrix3fv(uni.uCam, false, new Float32Array(

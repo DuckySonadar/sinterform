@@ -56,9 +56,22 @@ points, which is sharper per point but blind to anything the sampling misses —
 bounds that are wrong, a boolean folded the wrong way, a rotation applied in
 the other order. Those change the outline, and the outline is what this shows.
 
-The first scene is *every primitive*, which is the one that earns its keep: a
-broken primitive is obvious at a glance instead of being found later by
-whichever model happened to use it.
+The first scene, and the one it opens on, is *every primitive* — all of them
+at once, so a broken one is obvious at a glance instead of being found later by
+whichever model happened to use it. (`plane` and `field` sit it out: one is a
+half-space that would swallow the grid, the other needs data.)
+
+Two of the scenes are sketches: **sketch 2D, extruded** is a `sketch.js`
+profile closed by constraints and given a thickness, and **sketch 3D,
+extruded** is a `sketch3d.js` plate found by `profile()` and extruded along its
+own plane's normal. Both are solved when the scene loads, so what is on screen
+is the solver's answer rather than a shape typed in to look like one.
+
+A sketch extrude is not a primitive and never will be — it is an arbitrary
+polygon, and the shader has no way to be handed one. It reaches the GPU the
+only way anything non-primitive can: **baked into a `field`**, sampled on a
+grid, which is what that primitive is for. So those two scenes are also the
+only ones that exercise a baked field, on either side.
 
 ## Conventions
 
@@ -192,6 +205,16 @@ GL.samplerDecls(4)                          // sampler3D declarations, 4 of them
 `GL.call` knows the sampler-first calling convention baked primitives use, so
 a consumer does not have to. The uniform *expressions* are the caller's, which
 is what keeps the packing out of here.
+
+One thing a consumer does have to know: **a baked field takes its `range`
+through the slot every other primitive uses for corner rounding.** A field has
+no rounding, the range has to arrive somehow, and the JS twin reads it off the
+field object instead — so nothing in a plan carries it. Pack `round` there by
+mistake and every sample comes back multiplied by zero, which draws as the
+field's bounding box and looks exactly like a texture that never arrived.
+Uploading the texture is the consumer's job too; `viewer.js` does it in about
+twenty lines, and its `texOf` is the reference for the layout — `nz` wide by
+`ny` by `nx`, trilinear, edges clamped, to match `sampleField`.
 
 **No budgets live in this repository.** How many shapes fit in the uniforms
 and how many fields fit in texture units belong to whoever packs them — a

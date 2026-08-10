@@ -51,7 +51,12 @@ const ok = (cond, msg) => {
 // Scenes worth cross-checking. Coarse mesh resolution keeps the run short;
 // the silhouette is not sensitive to it at this size.
 const SCENES = ['every primitive', 'booleans', 'two bodies, no blend across',
-                'ice cream'];
+                'ice cream',
+                // The two that arrive as a baked field rather than as
+                // primitives, which is the only way a sketch can reach the
+                // shader at all -- and the only scenes here that exercise the
+                // field primitive on either side.
+                'sketch 2D, extruded', 'sketch 3D, extruded'];
 const RES = 0.9;
 
 const browser = await chromium.launch({

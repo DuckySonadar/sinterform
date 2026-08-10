@@ -78,10 +78,48 @@
 
 <script src="sinterform.js"></script>
 <script src="glsl.js"></script>
+<script src="sketch.js"></script>
+<script src="sketch3d.js"></script>
 <script src="viewer.js"></script>
 <script>
 "use strict";
 const N = SinterView.node;
+
+// ----------------------------------------------------------------------
+// baking, so a sketch can reach the shader at all
+// ----------------------------------------------------------------------
+// A sketch extrude is not a primitive and never will be -- it is an arbitrary
+// polygon, and the shader has no way to be handed one. The kernel already has
+// the answer to that, and it is the `field` primitive: sample the thing on a
+// grid, hand over the bytes, and both halves read the same numbers. So these
+// two scenes are also the only ones here that exercise a baked field, which
+// nothing else in the repository draws.
+//
+// Samples sit on the grid corners, spanning the box exactly, because that is
+// where sampleField reads them from.
+function bake(name, sdf, box, spacing, range) {
+  const n = box.map(b => Math.max(2, Math.round(2 * b / spacing) + 1));
+  const data = new Uint8Array(n[0] * n[1] * n[2]);
+  let w = 0;
+  for (let i = 0; i < n[0]; i++)
+    for (let j = 0; j < n[1]; j++)
+      for (let k = 0; k < n[2]; k++) {
+        const v = sdf(-box[0] + 2 * box[0] * i / (n[0] - 1),
+                      -box[1] + 2 * box[1] * j / (n[1] - 1),
+                      -box[2] + 2 * box[2] * k / (n[2] - 1)) / range;
+        data[w++] = Math.round((Math.min(Math.max(v, -1), 1) * 0.5 + 0.5) * 255);
+      }
+  return { name, nx: n[0], ny: n[1], nz: n[2], box, range, data, tex: null };
+}
+
+// The exact extrusion of a 2D profile: the profile's own distance against the
+// slab, whichever is nearer, with the corner handled by the usual min(max).
+function extrude2d(f, half) {
+  return (x, y, z) => {
+    const a = f(x, y), b = Math.abs(z) - half;
+    return Math.min(Math.max(a, b), 0) + Math.hypot(Math.max(a, 0), Math.max(b, 0));
+  };
+}
 
 // Scenes chosen for debugging rather than for looking nice. The first is the
 // one that earns its keep: every primitive at once, so a broken one is
@@ -114,6 +152,80 @@ const SCENES = {
   'ellipsoid — the loose one': () => [{ id: 0, nodes: [
     N('ellipsoid', { p: [0, 0, 22], d: [64, 26, 34] })
   ] }],
+  // A constrained 2D sketch, closed into a profile and extruded. Drawn rough
+  // and solved here exactly as it would be anywhere else, so what is on screen
+  // is the solver's answer rather than a shape typed in to look like one.
+  'sketch 2D, extruded': () => {
+    const S = new SinterSketch.Sketch();
+    const R = 9, L = 40, H = 11;
+    const c0 = S.point(0, 0, { fixed: true }), c1 = S.point(L * 0.8, 6);
+    const arcL = S.arc(c0, R, R, 0, Math.PI / 2, 3 * Math.PI / 2);
+    const arcR = S.arc(c1, R, R, 0, -Math.PI / 2, Math.PI / 2);
+    const top = S.line(S.point(2, R + 4), S.point(L, R + 2));
+    const bot = S.line(S.point(L, -R - 3), S.point(-2, -R));
+    const joint = (a, ae, b, be) => {
+      S.constrain('coincident', { e: a, end: ae }, { e: b, end: be });
+      S.constrain('parallel', { e: a, end: ae }, { e: b, end: be });
+    };
+    joint(arcL, 1, bot, 1); joint(bot, 0, arcR, 0);
+    joint(arcR, 1, top, 1); joint(top, 0, arcL, 0);
+    for (const a of [arcL, arcR]) {
+      S.constrain('circular', a);
+      S.constrain('radius', a, undefined, R);
+    }
+    S.constrain('distance', { p: c0 }, { p: c1 }, L);
+    S.constrain('horizontal', { e: S.line(c0, c1, { construction: true }) });
+    // a bore through it, concentric with one end
+    const bore = S.arc(S.point(L, 0), 4.5, 4.5, 0, 0, 2 * Math.PI);
+    S.constrain('circular', bore);
+    S.constrain('concentric', bore, arcR);
+    S.solve();
+
+    const prof = S.sdf2d(0.05);
+    const box = [L / 2 + R + 3, R + 3, H / 2 + 3];
+    // centred on the profile, then lifted so it stands on the plate
+    const f = extrude2d((x, y) => prof(x + L / 2, y), H / 2);
+    SinterForm.fields = [bake('sketch 2D', f, box, 0.55, 14)];
+    return [{ id: 0, nodes: [
+      N('field', { p: [-L / 2, 0, H / 2 + 4], d: box.slice(), fi: 0 })
+    ] }];
+  },
+
+  // The same thing one dimension up: a plate drawn in a plane of its own,
+  // found by profile(), and extruded along that plane's normal rather than
+  // along Z -- which is the whole reason sketch3d has its own extrude.
+  'sketch 3D, extruded': () => {
+    const S = new SinterSketch3D.Sketch3D();
+    const rot = [0.34, -0.42, 0.7], W = 46, Hh = 28, T = 9;
+    const F = SinterSketch3D.frameOf(rot[0], rot[1], rot[2]), u = F[0], v = F[1];
+    const at = (a, b) => S.point(u[0] * a + v[0] * b, u[1] * a + v[1] * b,
+                                 u[2] * a + v[2] * b);
+    const c = [at(0, 0), at(W, 0), at(W, Hh), at(0, Hh)];
+    c.forEach(p => S.fix(p));
+    const e = [S.line(c[0], c[1]), S.line(c[1], c[2]),
+               S.line(c[2], c[3]), S.line(c[3], c[0])];
+    const diag = S.line(c[0], c[2], { construction: true });
+    const hc = S.point(12, 3, 24);                 // the bore, drawn wrong
+    const bore = S.arc(hc, 5, 3, [0.2, 0.1, 0.4], 0, 2 * Math.PI);
+    S.constrain('circular', bore);
+    S.constrain('radius', bore, undefined, 7);
+    S.constrain('centre', { p: hc }, { e: diag });
+    S.constrain('parallel', { e: bore, t: S.param(0, { fixed: true }) }, { e: e[1] });
+    S.constrain('parallel', { e: bore, t: S.param(Math.PI / 2, { fixed: true }) }, { e: e[0] });
+    S.solve();
+
+    const face = S.profile(0.05).faces[0];
+    const solid = S.extrude(face, T);
+    const b = solid.bounds;
+    const mid = [0, 1, 2].map(i => (b.lo[i] + b.hi[i]) / 2);
+    const box = [0, 1, 2].map(i => (b.hi[i] - b.lo[i]) / 2 + 3);
+    SinterForm.fields = [bake('sketch 3D',
+      (x, y, z) => solid(x + mid[0], y + mid[1], z + mid[2]), box, 0.6, 16)];
+    return [{ id: 0, nodes: [
+      N('field', { p: [mid[0], mid[1], mid[2] - b.lo[2] + 4], d: box.slice(), fi: 0 })
+    ] }];
+  },
+
   'ice cream': () => [{ id: 0, nodes: [
     N('cone',      { p: [0, 0, 19], d: [3, 17, 44], round: 1 }),
     N('ellipsoid', { p: [0, 0, 50.5], d: [35, 35, 28.5] }),
