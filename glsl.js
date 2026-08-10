@@ -335,7 +335,103 @@ function samplerDecls(count) {
   return s;
 }
 
+// ----------------------------------------------------------------------
+// A whole plan, as shader source and as the uniforms that feed it.
+//
+// This used to live in viewer.js, on the reasoning that packing is a
+// consumer's business. It is -- but the *layout* is not: three vec4 per shape,
+// in this order, is a contract between the generated source and whoever fills
+// the array, and two consumers writing it separately is the same trap the
+// hand-written twins were. The viewer draws with it and glmesh.js meshes with
+// it, and they cannot disagree about which float is the blend radius.
+//
+// Budgets stay arguments, per this file's charter: `maxN` and `maxFields` are
+// facts about a caller's uniform block, not about geometry.
+//
+//   uD[3i + 0] = position.xyz, blend radius
+//   uD[3i + 1] = rotation.xyz (radians), round slot
+//   uD[3i + 2] = dims.xyz, unused
+//
+// `roundSlot` is required and is the kernel's `SinterForm.roundSlot`: it says
+// what goes in that fourth float, which is corner rounding for every primitive
+// but a baked field, where it is the field's range.
+function sceneBody(plan, opts) {
+  opts = opts || {};
+  const maxN = opts.maxN === undefined ? 32 : opts.maxN;
+  const maxFields = opts.maxFields === undefined ? 4 : opts.maxFields;
+  const uni = opts.uniform || 'uD';
+  let body = '', slot = 0;
+  const at = new Map();
+  for (const part of plan)
+    for (const n of part.nodes)
+      if (slot < maxN && !at.has(n)) at.set(n, slot++);
+  for (const part of plan) {
+    body += '  dB = 1e9;\n';
+    for (const n of part.nodes) {
+      const i = at.get(n);
+      if (i === undefined) continue;
+      const b = 3 * i;
+      body += '  q = P;\n';
+      if (n.mx) body += '  q.x = abs(q.x);\n';
+      if (n.my) body += '  q.y = abs(q.y);\n';
+      if (n.mz) body += '  q.z = abs(q.z);\n';
+      body += `  q = invRot(q - ${uni}[${b}].xyz, ${uni}[${b + 1}].xyz);\n`;
+      const fi = n.t === 'field'
+        ? Math.min(Math.max(n.fi || 0, 0), maxFields - 1)
+        : Math.max(n.fi || 0, 0);
+      body += `  di = ${call(n.t, 'q', `${uni}[${b + 2}].xyz`, `${uni}[${b + 1}].w`, fi)};\n`;
+      body += n.op === 'add' ? `  dB = smin(dB, di, ${uni}[${b}].w);\n`
+            : n.op === 'cut' ? `  dB = smax(dB, -di, ${uni}[${b}].w);\n`
+            :                  `  dB = smax(dB, di, ${uni}[${b}].w);\n`;
+    }
+    body += '  d = min(d, dB);\n';
+  }
+  return { body, at };
+}
+
+// The complete `float map(vec3 P)` for a plan: library, outlines, fold.
+function mapSource(plan, profiles, opts) {
+  const { body, at } = sceneBody(plan, opts);
+  const src = `${library()}\n${profileDecls(profiles, maxProfileSlot(plan))}\n`
+    + `float map(vec3 P){\n  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n`;
+  return { src, at };
+}
+
+// How many profile slots the shader must be able to name. A node may refer to
+// a slot the library has not filled in yet, and an undeclared pProfileN is a
+// compile error rather than an empty shape.
+function maxProfileSlot(plan) {
+  let n = 1;
+  for (const part of plan || [])
+    for (const q of part.nodes || [])
+      if (q.t === 'profile') n = Math.max(n, (q.fi | 0) + 1);
+  return n;
+}
+
+function packPlan(at, opts) {
+  opts = opts || {};
+  const maxN = opts.maxN === undefined ? 32 : opts.maxN;
+  const roundSlot = opts.roundSlot;
+  if (typeof roundSlot !== 'function')
+    throw new Error('packPlan needs opts.roundSlot (SinterForm.roundSlot)');
+  const RAD = Math.PI / 180;
+  const uData = opts.into || new Float32Array(maxN * 12);
+  uData.fill(0);
+  for (const [n, i] of at) {
+    const b = 12 * i;
+    uData[b] = n.p[0]; uData[b + 1] = n.p[1]; uData[b + 2] = n.p[2];
+    uData[b + 3] = Math.max(n.k || 0, 0);
+    uData[b + 4] = (n.r[0] || 0) * RAD;
+    uData[b + 5] = (n.r[1] || 0) * RAD;
+    uData[b + 6] = (n.r[2] || 0) * RAD;
+    uData[b + 7] = roundSlot(n);
+    uData[b + 8] = n.d[0]; uData[b + 9] = n.d[1] || 0; uData[b + 10] = n.d[2] || 0;
+  }
+  return uData;
+}
+
 const SinterFormGLSL = { GLSL, library, call, samplerDecls, profileDecls,
+                         sceneBody, mapSource, maxProfileSlot, packPlan,
                          KEYS: Object.keys(GLSL) };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterFormGLSL;
 root.SinterFormGLSL = SinterFormGLSL;

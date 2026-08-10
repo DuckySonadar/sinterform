@@ -841,6 +841,52 @@ function surfaceNets(vol, nx, ny, nz, ox, oy, oz, res) {
   return { positions: new Float32Array(verts), indices: new Uint32Array(tris) };
 }
 
+// A plan, meshed. The grid is derived from the scene's own bounds, filled by
+// `opts.sample`, and walked by surfaceNets.
+//
+// The filling is pluggable and the default is this file's own JS evaluation,
+// which is the point: it is one SDF call per grid corner and essentially all
+// of the cost, so it is the half worth moving to a GPU. `glmesh.js` provides a
+// sampler that does exactly that, with the same signature, and nothing here
+// knows whether it was used -- which is what keeps this file free of any
+// notion that a GPU exists.
+//
+//   SinterForm.mesh(plan)                              // JS, always works
+//   SinterForm.mesh(plan, { sample: SinterGLMesh.sampler() })   // on the GPU
+//
+// `res` is the grid spacing in mm. `maxSamples` is a guard, not a policy: a
+// grid is cubic in 1/res and it is easy to ask for a hundred gigabytes by
+// dragging a slider.
+function mesh(plan, opts) {
+  opts = opts || {};
+  const res = opts.res === undefined ? 0.6 : opts.res;
+  const maxSamples = opts.maxSamples === undefined ? 24e6 : opts.maxSamples;
+  const nodes = [];
+  for (const part of plan) for (const n of part.nodes) nodes.push(n);
+  const B = opts.bounds || sceneBounds(nodes);
+  if (!B) return null;
+  const pad = 2 * res;
+  const lo = [B.lo[0] - pad, B.lo[1] - pad, B.lo[2] - pad];
+  const n = [0, 1, 2].map(i => Math.ceil((B.hi[i] - B.lo[i] + 2 * pad) / res) + 1);
+  const total = n[0] * n[1] * n[2];
+  if (total > maxSamples)
+    throw new Error(`mesh: ${(total / 1e6).toFixed(1)} M samples at ${res} mm`
+      + ` exceeds maxSamples (${(maxSamples / 1e6).toFixed(0)} M)`);
+  const vol = new Float32Array(total);
+  if (opts.sample) {
+    opts.sample(plan, lo, n, res, vol);
+  } else {
+    let k = 0;
+    for (let i = 0; i < n[0]; i++)
+      for (let j = 0; j < n[1]; j++)
+        for (let m = 0; m < n[2]; m++)
+          vol[k++] = sceneSDF(plan, lo[0] + i * res, lo[1] + j * res, lo[2] + m * res);
+  }
+  const out = surfaceNets(vol, n[0], n[1], n[2], lo[0], lo[1], lo[2], res);
+  out.lo = lo; out.n = n; out.res = res; out.samples = total;
+  return out;
+}
+
 function meshToSTL(m, header) {
   const nt = m.indices.length / 3;
   const buf = new ArrayBuffer(84 + nt * 50);
@@ -886,7 +932,7 @@ const SinterForm = {
   decodeField, encodeField, sampleField,
   polygonSDF, profileExtent,
   smin, smax, invRot, roundSlot,
-  sceneSDF, sceneBounds, surfaceNets, meshToSTL
+  sceneSDF, sceneBounds, surfaceNets, mesh, meshToSTL
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterForm;
 root.SinterForm = SinterForm;

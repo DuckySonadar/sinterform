@@ -9,6 +9,7 @@ STL output. Dependency-free JavaScript.
 | `glsl.js` | **each primitive's definition**, as GLSL, plus the two shader budgets |
 | `sinterform.js` | the kernel — those definitions translated to JS, booleans, bounds, meshing |
 | `build-twins.mjs` | the translator; `--check` fails if the generated block is stale |
+| `glmesh.js` | optional: fills the mesher's grid on the GPU instead of in JS |
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
 | `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
 | `sweep.js` | a profile dragged along a sketch path, flat or through space |
@@ -50,8 +51,9 @@ packing, the budgets, the raymarch loop, the camera, the lights.
 Its one real trick is that it draws every scene **two ways**:
 
 - **GLSL · GPU** runs `glsl.js` in a fragment shader and sphere-traces it
-- **JS · mesh** runs the JS twins in `sinterform.js` and meshes them with
-  `surfaceNets`
+- **JS · mesh** meshes the scene with `surfaceNets` and draws the triangles.
+  The grid behind it is filled on the GPU when `glmesh.js` is there and in JS
+  when it is not; the status line says which.
 
 Those are meant to be the same shape, so flipping between them is a
 divergence detector you can see. `check-glsl.mjs` compares the two at sampled
@@ -153,6 +155,25 @@ sceneBounds(nodes) → { lo: [x, y, z], hi: [x, y, z] } | null
 Axis-aligned bounds, in mm, of everything that *adds* material — takes a flat
 shape list, not a plan. `null` when nothing does. It returns `lo`/`hi`, not
 `x0`/`x1`.
+
+```js
+mesh(plan, opts) → { positions, indices, lo, n, res, samples } | null
+```
+A plan, meshed. Derives the grid from `sceneBounds`, fills it, and walks it with
+`surfaceNets`. `opts.res` is the grid spacing in mm (default 0.6); `opts.bounds`
+overrides the computed box; `opts.maxSamples` guards against asking for a
+hundred gigabytes by dragging a slider (default 24 M).
+
+`opts.sample` is the pluggable part, and the reason this function exists.
+Filling the grid is one SDF evaluation per corner — essentially all of the cost —
+so it is the half worth moving off the CPU:
+
+```js
+SinterForm.mesh(plan)                                    // JS, always works
+SinterForm.mesh(plan, { sample: SinterGLMesh.sampler() })   // grid on the GPU
+```
+
+Nothing in the kernel knows which was used.
 
 ```js
 surfaceNets(vol, nx, ny, nz, ox, oy, oz, res) → { positions, indices }
@@ -382,6 +403,38 @@ tens of seconds and unrolled ones in a few. A slot with no outline still emits
 a function that returns `1e9`, because the shader is generated from the plan
 and a node can name a profile that has not arrived yet — so changing an
 outline means recompiling, while moving the node does not.
+
+### Meshing on the GPU (`glmesh.js`)
+
+Optional, and optional in the strongest sense: the kernel does not import it,
+does not know it exists, and meshes perfectly well without it.
+
+```js
+SinterGLMesh.available(gl?)   // is there a WebGL2 float target to be had?
+SinterGLMesh.sampler(opts)    // a grid filler for SinterForm.mesh
+SinterGLMesh.mesh(plan, opts) // both, for a caller that just wants triangles
+```
+
+It builds the same `float map(vec3)` the viewer raymarches — through `glsl.js`'s
+`mapSource` and `packPlan`, so there is exactly one opinion about what the scene
+is and what each uniform means — renders the grid into a float target a slab of
+rows at a time, and reads it back. `opts.gl` lends it a context (it restores the
+framebuffer, viewport, program and VAO it found); without one it makes its own
+offscreen, `OffscreenCanvas` where that exists so it works in a worker.
+
+**It does not emit triangles on the GPU, and cannot.** A fragment shader
+produces one value per pixel; a mesh is a variable-length list of connected
+triangles, which needs the compute shaders, atomics and prefix sums WebGL2 does
+not have. So "GPU meshing" is half true here — and it is the expensive half.
+Real GPU triangle generation is a WebGPU port.
+
+Two things to expect when comparing it against the JS path. The shader works in
+fp32, and any *rotated* shape puts its Euler angles through `cos`/`sin`, which
+GLSL ES promises only to about 2⁻¹¹ relative — a few thousandths of a millimetre
+at these coordinates. That moves a handful of grid samples across zero near the
+surface, which can change a triangle count by a few and a volume by ~0.01%.
+`check-glmesh.mjs` asserts every sign difference is a sample within 0.02 mm of
+the surface, which is the property that actually matters.
 
 ## Sketches (`sketch.js`)
 

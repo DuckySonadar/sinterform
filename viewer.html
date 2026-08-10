@@ -84,6 +84,7 @@
 <script src="glsl.js"></script>
 <script src="sketch.js"></script>
 <script src="sketch3d.js"></script>
+<script src="glmesh.js"></script>
 <script src="viewer.js"></script>
 <script>
 "use strict";
@@ -270,10 +271,11 @@ addEventListener('resize', size);
 
 function status() {
   const v = V.view;
-  const bits = [`mode: ${v.mode === 'mesh' ? 'JS twins, meshed' : 'GLSL, raymarched'}`];
+  const bits = [`mode: ${v.mode === 'mesh' ? 'meshed, surface nets' : 'GLSL, raymarched'}`];
   const shapes = v.plan.reduce((s, p) => s + p.nodes.length, 0);
   bits.push(`${shapes} shape${shapes === 1 ? '' : 's'} · ${v.plan.length} bod${v.plan.length === 1 ? 'y' : 'ies'}`);
-  if (v.mode === 'mesh') bits.push(`${v.tris.toLocaleString()} triangles · ${v.meshMs} ms @ ${v.res} mm`);
+  if (v.mode === 'mesh') bits.push(`${v.tris.toLocaleString()} triangles · ${v.meshMs} ms @ ${v.res} mm`
+    + (v.meshedOn ? ` · grid on the ${v.meshedOn}` : ''));
   else bits.push(`step ${SinterView.STEP} of the reported distance`);
   $('stat').textContent = bits.join('\n');
   $('err').style.display = v.lastError ? 'block' : 'none';

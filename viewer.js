@@ -172,7 +172,8 @@ function attach(canvas, opts) {
   const view = {
     plan: [], mode: 'raymarch', tint: [0.91, 0.56, 0.24],
     yaw: -0.9, pitch: 0.55, dist: 140, target: [0, 0, 12],
-    res: opts.res || 0.6, flat: false, mesh: null, tris: 0, meshMs: 0, lastError: null
+    res: opts.res || 0.6, flat: false, mesh: null, tris: 0, meshMs: 0,
+    meshedOn: null, lastError: null
   };
   let prog = null, uni = {}, meshProg = null, meshVao = null, meshCount = 0;
   const uData = new Float32Array(MAXN * 12);
@@ -211,24 +212,32 @@ void main(){
   o = vec4(pow(uTint*(dif + 0.30 + 0.12*n.z) + vec3(spec), vec3(0.85)), 1.0);
 }`;
 
+  // glmesh.js is optional: the viewer works without it and falls back to the
+  // kernel's JS sampling. Resolved once, because `available()` makes a context
+  // to find out.
+  let sampler;
+  function gpuSampler() {
+    if (sampler === undefined) {
+      const GM = root.SinterGLMesh;
+      sampler = (GM && GM.available(gl))
+        ? GM.sampler({ gl, maxN: MAXN, maxFields: MAXFIELDS }) : null;
+    }
+    return sampler;
+  }
+
   function buildMesh() {
     const t0 = Date.now();
     const nodes = [];
     for (const part of view.plan) for (const n of part.nodes) nodes.push(n);
     const B = SF.sceneBounds(nodes);
     if (!B) { view.mesh = null; view.tris = 0; return; }
-    const res = view.res, pad = 2 * res;
-    const lo = [B.lo[0] - pad, B.lo[1] - pad, B.lo[2] - pad];
-    const n = [0, 1, 2].map(i => Math.ceil((B.hi[i] - B.lo[i] + 2 * pad) / res) + 1);
-    const total = n[0] * n[1] * n[2];
-    if (total > 24e6) { view.lastError = `grid too big (${(total / 1e6).toFixed(0)} M)`; return; }
-    const vol = new Float32Array(total);
-    let k = 0;
-    for (let i = 0; i < n[0]; i++)
-      for (let j = 0; j < n[1]; j++)
-        for (let m = 0; m < n[2]; m++)
-          vol[k++] = SF.sceneSDF(view.plan, lo[0] + i * res, lo[1] + j * res, lo[2] + m * res);
-    const mesh = SF.surfaceNets(vol, n[0], n[1], n[2], lo[0], lo[1], lo[2], res);
+    // Filling the grid is one SDF call per corner and essentially all of the
+    // cost, so it goes to the GPU when there is one -- through the kernel's
+    // own `mesh`, which takes the sampler as an argument and does not care
+    // which it got. The JS path is the fallback, not a second implementation.
+    const mesh = SF.mesh(view.plan, { res: view.res, bounds: B, sample: gpuSampler() });
+    view.meshedOn = gpuSampler() ? 'GPU' : 'JS';
+    if (!mesh) { view.mesh = null; view.tris = 0; return; }
     const P = mesh.positions, I = mesh.indices;
     const N = new Float32Array(P.length);
     for (let t = 0; t < I.length; t += 3) {
