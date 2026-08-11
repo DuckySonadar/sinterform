@@ -58,7 +58,9 @@ const SCENES = ['every primitive', 'booleans', 'two bodies, no blend across',
                 // Sketches reach the shader as compiled-in outlines, so these
                 // two are where profileDecls is held against polygonSDF with
                 // a real solved profile rather than a test polygon.
-                'sketch 2D, extruded', 'sketch 3D, extruded'];
+                'sketch 2D, extruded', 'sketch 3D, extruded',
+                // one node, N round cones, blended into a block
+                'wire, tapered and blended'];
 const RES = 0.9;
 
 const browser = await chromium.launch({

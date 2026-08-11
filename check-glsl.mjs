@@ -135,6 +135,44 @@ const cases = KEYS.map(k => {
                js: (p, dd, r) => SF.PRIMS.profile.js(p, dd, r, { fi: 99 }), pts });
 }
 
+// `wire`: the unrolled round-cone macro against the rolled loop the JS twin
+// was generated from. The taper is the point -- a lerped radius would agree at
+// the ends and be wrong by millimetres in between -- so the test wire tapers,
+// bends, and includes a segment whose spheres swallow one another, which is
+// the branch with no tangent cone.
+{
+  const lines = [
+    [[-14, 0, 0, 4], [0, 0, 0, 2.5], [0, 14, 0, 1]],
+    [[6, -12, -5, 5], [9, -12, -5, 1.5]]
+  ];
+  SF.wires = [{ name: 'test L', lines }];
+  const d = SF.wireExtent(lines);
+  const pts = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.7;
+    pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.7;
+    pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 2.5;
+  }
+  cases.push({ key: 'wire', fn: 'pWire0', glsl: GL.wireDecls(SF.wires),
+               name: SF.PRIMS.wire.name, d, r: 0, slotted: true, pts });
+}
+
+// An empty wire slot, which is the default tapered run. Same reason as the
+// profile default: that shape is written out once per file and this is what
+// stops the two copies drifting.
+{
+  const d = [12, 2, 2];
+  const pts = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.8;
+    pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 4.0;
+    pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 4.0;
+  }
+  cases.push({ key: 'wireDefault', fn: 'pWire0', glsl: GL.wireDecls([]),
+               name: 'Wire (empty slot → default)', d, r: 0, slotted: true,
+               js: (p, dd, r) => SF.PRIMS.wire.js(p, dd, r, { fi: 99 }), pts });
+}
+
 // And `field`, which until now was the only primitive with no per-point check
 // at all -- the loop skips it as baked, and its two halves reach the samples
 // by genuinely different routes: the shader asks the sampler hardware, the JS

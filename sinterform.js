@@ -65,6 +65,16 @@ let fields = [];         // [{ name, nx, ny, nz, box:[hx,hy,hz], range, data, te
 // node of type `profile` refers to one by index.
 let profiles = [];       // [{ name, loops: [[[x, y], ...], ...] }]
 
+// Wires, the third of the same idea: a shape that is a *path* rather than an
+// area or a volume. A drawn curve has no interior, so the only solid it stands
+// for is the one you get by giving it a thickness -- and that thickness may
+// vary as it goes, which is what the fourth number on each point is for.
+//
+// [x, y, z, r] per point, one polyline per entry of `lines`, so a wire can be
+// several disjoint curves. Like fields and profiles, it lives on the document
+// and a node of type `wire` refers to one by index.
+let wires = [];          // [{ name, lines: [[[x, y, z, r], ...], ...] }]
+
 // iq's polygon distance: nearest edge for the magnitude, a crossing count for
 // the sign. Loops beyond the first are holes -- a point inside an odd number
 // of them is outside the material. Exact, and 1-Lipschitz.
@@ -112,6 +122,53 @@ function polygonSDF(loops, px, py) {
 // an empty slot is a 20 x 20 mm square, which is also what makes `profile`
 // appear in the viewer's every-primitive scene with no setup at all.
 const DEFAULT_OUTLINE = [[[-10, -10], [10, -10], [10, 10], [-10, 10]]];
+
+// A wire with nothing in it is still a shape, same reasoning as the profile's
+// default square: a node can name a slot the application has not filled yet.
+// A 20 mm run at 2 mm radius, tapering to 1, so the default shows that the
+// thickness varies rather than hiding it.
+const DEFAULT_WIRE = [[[-10, 0, 0, 2], [10, 0, 0, 1]]];
+
+// The segments of a wire, flattened across its polylines and cached on it:
+// eight numbers each -- ax, ay, az, ra, bx, by, bz, rb. Zero-length segments
+// are dropped here rather than guarded for in the shader.
+function wireSegments(w) {
+  const lines = (w && w.lines && w.lines.some(l => l && l.length >= 2))
+    ? w.lines : DEFAULT_WIRE;
+  if (w && w._segSrc === lines) return w._segs;
+  const e = [];
+  for (const line of lines) {
+    if (!line || line.length < 2) continue;
+    for (let i = 1; i < line.length; i++) {
+      const a = line[i - 1], b = line[i];
+      if (Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) < 1e-12) continue;
+      e.push(a[0], a[1], a[2], a[3] === undefined ? 1 : a[3],
+             b[0], b[1], b[2], b[3] === undefined ? 1 : b[3]);
+    }
+  }
+  if (w) { w._segSrc = lines; w._segs = e; }
+  return e;
+}
+function segCount(w) { return wireSegments(w).length / 8; }
+function segAx(w, i) { return wireSegments(w)[8 * i]; }
+function segAy(w, i) { return wireSegments(w)[8 * i + 1]; }
+function segAz(w, i) { return wireSegments(w)[8 * i + 2]; }
+function segRA(w, i) { return wireSegments(w)[8 * i + 3]; }
+function segBx(w, i) { return wireSegments(w)[8 * i + 4]; }
+function segBy(w, i) { return wireSegments(w)[8 * i + 5]; }
+function segBz(w, i) { return wireSegments(w)[8 * i + 6]; }
+function segRB(w, i) { return wireSegments(w)[8 * i + 7]; }
+
+// Half-extents of a wire, each point expanded by its own radius. Tight: the
+// furthest reach along any axis is attained at some point plus its radius.
+function wireExtent(lines) {
+  const e = wireSegments({ lines });
+  let h = [0, 0, 0];
+  for (let i = 0; i < e.length; i += 8)
+    for (const [o, r] of [[0, e[i + 3]], [4, e[i + 7]]])
+      for (let k = 0; k < 3; k++) h[k] = Math.max(h[k], Math.abs(e[i + o + k]) + r);
+  return h;
+}
 
 // The edges of an outline, flattened across its loops and cached on it: each
 // entry is Ax, Ay, Bx, By, where B is the *previous* vertex, matching the
@@ -443,6 +500,50 @@ const TWINS = {
     let v = (((sampleFieldUVW(s, uvw_2, uvw_1, uvw_0) * 2.0) - 1.0) * r);
     return Math.max(v, box);
   },
+  // pWire — from GLSL.wire.src
+  wire: (p, d, r, $node) => {
+    const w = wires[($node && $node.fi) || 0];
+    let p_0 = p[0], p_1 = p[1], p_2 = p[2];
+    let d_0 = d[0], d_1 = d[1], d_2 = d[2];
+    let best = 1e18;
+    let n = segCount(w);
+    let i = 0;
+    for (; (i < n);) {
+      let A_0 = segAx(w, i), A_1 = segAy(w, i), A_2 = segAz(w, i);
+      let B_0 = segBx(w, i), B_1 = segBy(w, i), B_2 = segBz(w, i);
+      let rr_0 = segRA(w, i), rr_1 = segRB(w, i);
+      let ba_0 = (B_0 - A_0), ba_1 = (B_1 - A_1), ba_2 = (B_2 - A_2);
+      let pa_0 = (p_0 - A_0), pa_1 = (p_1 - A_1), pa_2 = (p_2 - A_2);
+      let l2 = (ba_0*ba_0 + ba_1*ba_1 + ba_2*ba_2);
+      let dr = (rr_0 - rr_1);
+      let a2 = (l2 - (dr * dr));
+      if ((a2 <= 0.0)) {
+        best = Math.min(best, Math.min((Math.hypot(pa_0, pa_1, pa_2) - rr_0), (Math.hypot((p_0 - B_0), (p_1 - B_1), (p_2 - B_2)) - rr_1)));
+      } else {
+        let il2 = (1.0 / l2);
+        let y = (pa_0*ba_0 + pa_1*ba_1 + pa_2*ba_2);
+        let z = (y - l2);
+        let cx_0 = ((pa_0 * l2) - (ba_0 * y)), cx_1 = ((pa_1 * l2) - (ba_1 * y)), cx_2 = ((pa_2 * l2) - (ba_2 * y));
+        let x2 = (cx_0*cx_0 + cx_1*cx_1 + cx_2*cx_2);
+        let y2 = ((y * y) * l2);
+        let z2 = ((z * z) * l2);
+        let k = (((Math.sign(dr) * dr) * dr) * x2);
+        let dd = 0.0;
+        if ((((Math.sign(z) * a2) * z2) > k)) {
+          dd = ((Math.sqrt((x2 + z2)) * il2) - rr_1);
+        } else {
+          if ((((Math.sign(y) * a2) * y2) < k)) {
+            dd = ((Math.sqrt((x2 + y2)) * il2) - rr_0);
+          } else {
+            dd = (((Math.sqrt(((x2 * a2) * il2)) + (y * dr)) * il2) - rr_0);
+          }
+        }
+        best = Math.min(best, dd);
+      }
+      i += 1;
+    }
+    return best;
+  },
   // pProfile — from GLSL.profile.src
   profile: (p, d, r, $node) => {
     const o = profiles[($node && $node.fi) || 0];
@@ -638,6 +739,19 @@ const PRIMS = {
   // No rounding: the outline already says what its corners do. Rotating the
   // node is what puts the extrusion somewhere other than up the Z axis, which
   // is how a face found in a tilted plane arrives here.
+  // A drawn path given a thickness that may vary along it. Like `profile` and
+  // `field`, the data is on the document and `fi` says which; unlike them, the
+  // dims are purely the bounds, since a wire's shape is entirely in its points.
+  wire: {
+    name: 'Wire', round: false, baked: true,
+    dims: [['Half width', 0.5, 200, 0.5], ['Half depth', 0.5, 200, 0.5],
+           ['Half height', 0.5, 200, 0.5]],
+    // matches DEFAULT_WIRE, so a wire node with no data behind it is a 20 mm
+    // tapered run rather than nothing at all
+    def: [12, 2, 2],
+    js: TWINS.wire,
+    ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
+  },
   profile: {
     name: 'Profile', round: false, baked: true,
     dims: [['Half width', 0.5, 200, 0.5], ['Half depth', 0.5, 200, 0.5],
@@ -929,8 +1043,10 @@ const SinterForm = {
   set fields(v) { fields = v; },
   get profiles() { return profiles; },
   set profiles(v) { profiles = v; },
+  get wires() { return wires; },
+  set wires(v) { wires = v; },
   decodeField, encodeField, sampleField,
-  polygonSDF, profileExtent,
+  polygonSDF, profileExtent, wireExtent,
   smin, smax, invRot, roundSlot,
   sceneSDF, sceneBounds, surfaceNets, mesh, meshToSTL
 };

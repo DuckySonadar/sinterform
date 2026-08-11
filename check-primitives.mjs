@@ -60,12 +60,26 @@ SF.profiles = [{ name: 'test cross', loops: [
   [[-2.5, -2.5], [2.5, -2.5], [2.5, 2.5], [-2.5, 2.5]]
 ] }];
 
+// `wire` reads its path from the document too. An L with a taper along it:
+// the corner exercises the shared-endpoint sphere that fills a joint, and the
+// varying radius exercises the round cone, which is the whole reason this
+// primitive is not just a chain of capsules. Its extent matches the default
+// dims so `ext` is tight.
+const TEST_WIRE = [[[-14, 0, 0, 4], [0, 0, 0, 2.5], [0, 14, 0, 1]]];
+SF.wires = [{ name: 'test L', lines: TEST_WIRE }];
+
+// A primitive whose shape lives on the document has dims that are purely its
+// bounds, so the side-loaded data decides them rather than `def`. Using `def`
+// here would test the default shape's box against the test shape's geometry,
+// which is a failure with nothing wrong behind it.
+const DIMS = { wire: SF.wireExtent(TEST_WIRE) };
+
 let worstEver = 0, worstWho = '';
 
 for (const key of SF.PRIM_KEYS) {
   if (SKIP.has(key)) continue;
   const P = SF.PRIMS[key];
-  const d = P.def.slice();
+  const d = (DIMS[key] || P.def).slice();
   const round = P.round ? 1.5 : 0;
   const f = (x, y, z) => P.js([x, y, z], d, round, { fi: 0 });
   const E = P.ext(d).map(v => v + round);

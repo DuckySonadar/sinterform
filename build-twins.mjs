@@ -51,6 +51,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const INTRINSICS = {
   fieldSample: { t: 'float', js: 'sampleFieldUVW($0, $1, $2, $3)' },
   edgeCount:   { t: 'int',   js: 'edgeCount($0)' },
+  segCount:    { t: 'int',   js: 'segCount($0)' },
+  segA:        { t: 'vec3',  js: ['segAx($0, $1)', 'segAy($0, $1)', 'segAz($0, $1)'] },
+  segB:        { t: 'vec3',  js: ['segBx($0, $1)', 'segBy($0, $1)', 'segBz($0, $1)'] },
+  segR:        { t: 'vec2',  js: ['segRA($0, $1)', 'segRB($0, $1)'] },
   // one JS expression per component, so a vec2 intrinsic does not have to be
   // called twice to be taken apart
   edgeA:       { t: 'vec2',  js: ['edgeAx($0, $1)', 'edgeAy($0, $1)'] },
@@ -62,7 +66,8 @@ const INTRINSICS = {
 const NODE_ARG = '$node';
 const OPAQUE = {
   sampler3D: `fields[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
-  outline:   `profiles[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`
+  outline:   `profiles[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
+  polyline:  `wires[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`
 };
 
 // ---------------------------------------------------------------- tokens ----
@@ -307,7 +312,7 @@ function emit(fn) {
 
   const NUM = (s) => (s.includes('.') || /[eE]/.test(s)) ? s : s;
   const M1 = { abs: 'Math.abs', sqrt: 'Math.sqrt', sin: 'Math.sin',
-               cos: 'Math.cos', floor: 'Math.floor' };
+               cos: 'Math.cos', floor: 'Math.floor', sign: 'Math.sign' };
 
   function ex(node) {
     switch (node.n) {

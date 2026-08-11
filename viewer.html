@@ -238,6 +238,23 @@ const SCENES = {
     return [{ id: 0, nodes: [N('profile', node)] }];
   },
 
+  // A drawn 3D sketch given a thickness that varies as it goes, blended into a
+  // block. The wire is one node, not one per segment -- which is what lets `k`
+  // mean "blend against the block" rather than "blend with my own neighbours".
+  'wire, tapered and blended': () => {
+    const S = new SinterSketch3D.Sketch3D();
+    const a = S.point(-26, -14, 0), b = S.point(-4, 16, 6);
+    const c = S.point(20, -6, 18), e = S.point(30, 14, 30);
+    S.nurbs([a, b, c, e], 3);
+    const { wire, node } = S.wireShape(t => 1.5 + 5 * t, { tol: 0.15 });
+    SinterForm.wires = [wire];
+    node.p[2] += 16; node.k = 5;
+    return [{ id: 0, nodes: [
+      N('box', { p: [0, 0, 6], d: [70, 46, 12], round: 3, k: 5 }),
+      N('wire', node)
+    ] }];
+  },
+
   'ice cream': () => [{ id: 0, nodes: [
     N('cone',      { p: [0, 0, 19], d: [3, 17, 44], round: 1 }),
     N('ellipsoid', { p: [0, 0, 50.5], d: [35, 35, 28.5] }),

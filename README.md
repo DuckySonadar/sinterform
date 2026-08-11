@@ -65,8 +65,13 @@ The first scene, and the one it opens on, is *every primitive* — all of them
 at once, so a broken one is obvious at a glance instead of being found later by
 whichever model happened to use it. `profile` is in it too, drawing its default
 20 × 20 mm square — a primitive that shows nothing until an application feeds it
-is a primitive nobody can see to fix. (`plane` and `field` sit it out: one is a
+is a primitive nobody can see to fix, and `wire` is there on the same terms
+with its default tapered run. (`plane` and `field` sit it out: one is a
 half-space that would swallow the grid, the other needs real samples.)
+
+**wire, tapered and blended** is the one that shows why a wire is a primitive
+rather than a chain of capsules: a NURBS curve thickened 1.5 → 6.5 mm along its
+length, blended into a block, as a single node.
 
 Two of the scenes are sketches: **sketch 2D, extruded** is a `sketch.js`
 profile closed by constraints and given a thickness, and **sketch 3D,
@@ -120,7 +125,7 @@ these are the fields the kernel reads:
 | `on` | `false` hides it from bounds; callers usually filter these out first |
 | `b` | which body it belongs to |
 | `mx`, `my`, `mz` | mirror across that axis (evaluates at `abs` of the coordinate) |
-| `fi` | which baked field, for `t: 'field'` — or which outline, for `t: 'profile'` |
+| `fi` | which document entry: a `field`, a `profile`'s outline, or a `wire`'s path |
 
 Shapes fold in order: each one is combined with the running distance so far,
 so a `cut` removes what is already there and the order of the list matters.
@@ -375,6 +380,52 @@ one of the three the shape actually reads.
 
 `profiles` is a getter/setter pair with the same rule as `fields`: assign to
 `SinterForm.profiles`, never write through a captured local.
+
+### Wires
+
+A drawn path given a thickness, and the thickness may vary as it goes. This is
+what a 3D sketch becomes: a curve has no interior, so the only solid it stands
+for is the one you get by thickening it.
+
+```js
+SinterForm.wires = [{ name, lines: [[[x, y, z, r], ...], ...] }];
+wireExtent(lines)
+```
+
+Four numbers per point — position and **radius at that point** — and one entry
+of `lines` per polyline, so a wire can be several disjoint curves. An empty slot
+is a 20 mm run tapering 2 → 1 mm.
+
+The element is **iq's round cone**: the convex hull of a sphere at each end,
+which is exactly what a segment with a different radius at each end is. It
+matters that it is not the obvious thing. Lerping the radius and subtracting it
+looks right and is not a distance — the surface between two different-radius
+spheres is a *slanted* tangent cone, so measuring perpendicular to the axis
+over-reports by the secant of the slant. On a 20 mm segment going 2 → 8 mm that
+is **1.3 mm of error and a Lipschitz constant of 1.044**; the round cone is
+0.9999 and exact.
+
+Joints need no special case at all. Consecutive segments share an endpoint, so
+the sphere there fills the corner — and unlike a sweep, the turn *direction*
+never matters, because a ball revolved about any axis is the same ball.
+
+`sketch3d.js` produces both halves in one call, mirroring `shape()`:
+
+```js
+const { wire, node } = S.wireShape(2);              // constant
+const { wire, node } = S.wireShape(t => 1 + 4 * t); // tapered along each curve
+SinterForm.wires = [wire];
+```
+
+**Why this is one primitive and not N capsule nodes.** You can build the same
+solid today by placing a `capsule` node per segment with `r` aiming its local
++Z along the segment — it agrees to 1.4e-14 mm. Two things break when you do:
+the node budget (one node per segment, against a typical 32), and the blend. A
+plan has one `k` per node, so give that chain `k > 0` to blend it against the
+scene and the capsules blend *with each other*, bulging the wire at every joint
+— measured at 3.75 mm radius where 3 was asked for. Inside one primitive the
+`min` happens below the blend, where there is no `k`, and the node's `k` then
+applies once to the finished wire.
 
 Neither sketch module needs to know this file exists to produce one, because a
 profile and a node are both plain data. `S.shape(height)` in `sketch.js` and

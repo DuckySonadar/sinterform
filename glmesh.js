@@ -145,7 +145,8 @@ function sampler(opts) {
     const prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
     const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
 
-    const { src, at } = GL.mapSource(plan, SF.profiles, { maxN, maxFields });
+    const { src, at } = GL.mapSource(plan, SF.profiles,
+                                     { maxN, maxFields, wires: SF.wires });
     const prog = gl.createProgram();
     gl.attachShader(prog, compile(gl, VS, gl.VERTEX_SHADER));
     gl.attachShader(prog, compile(gl, head(maxN, maxFields) + src + TAIL,

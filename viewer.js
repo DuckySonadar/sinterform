@@ -160,7 +160,10 @@ function fragSource(plan) {
   const { body, at } = mapBody(plan);
   // A profile's outline is compiled into the shader rather than uploaded, so
   // the source depends on the document's profiles as well as on the plan.
-  return { src: PREAMBLE + `${GL.library()}\n${GL.profileDecls(SF.profiles, maxProfileSlot(view.plan))}\nfloat map(vec3 P){\n`
+  return { src: PREAMBLE + `${GL.library()}\n`
+    + `${GL.profileDecls(SF.profiles, GL.maxSlot(view.plan, 'profile'))}\n`
+    + `${GL.wireDecls(SF.wires, GL.maxSlot(view.plan, 'wire'))}\n`
+    + `float map(vec3 P){\n`
     + `  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n` + TAIL, at };
 }
 

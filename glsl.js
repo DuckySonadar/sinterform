@@ -197,6 +197,60 @@ float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
   return max(v, box);
 }` },
 
+  // A wire: the drawn curves given a thickness that may vary as it goes.
+  //
+  // The element is iq's round cone -- the convex hull of a sphere at each end
+  // -- which is what a segment with a different radius at each end actually
+  // is. It reduces to a capsule when the radii match, so a constant-thickness
+  // wire costs nothing extra, and it is exact where a lerped radius is not: a
+  // tapered surface is slanted, so measuring perpendicular to the axis
+  // over-reports by the secant of the slant. This formula measures to the
+  // slant.
+  //
+  // Consecutive segments share an endpoint, so the sphere there fills the
+  // joint and there is no corner case to write. That is the whole reason a
+  // wire is simpler than a sweep: a ball revolved about any axis is the same
+  // ball, so the turn direction never matters.
+  //
+  // Rolled, like `profile`, with the segments reached through intrinsics --
+  // `wireDecls` unrolls this same loop for the GPU.
+  wire: { fn: 'pWire', slotted: true, spec: true,
+    src: `float pWire(polyline w, vec3 p, vec3 d, float r){
+  float best = 1e18;
+  int n = segCount(w);
+  for (int i = 0; i < n; i++) {
+    vec3 A = segA(w, i);
+    vec3 B = segB(w, i);
+    vec2 rr = segR(w, i);
+    vec3 ba = B - A;
+    vec3 pa = p - A;
+    float l2 = dot(ba, ba);
+    float dr = rr.x - rr.y;
+    float a2 = l2 - dr*dr;
+    // One sphere swallowing the other -- or a zero-length segment -- has no
+    // tangent cone between them, and the hull is just the larger sphere. min
+    // of the two gives exactly that, since the contained one is never nearer.
+    if (a2 <= 0.0) {
+      best = min(best, min(length(pa) - rr.x, length(p - B) - rr.y));
+    } else {
+      float il2 = 1.0/l2;
+      float y = dot(pa, ba);
+      float z = y - l2;
+      vec3 cx = pa*l2 - ba*y;
+      float x2 = dot(cx, cx);
+      float y2 = y*y*l2;
+      float z2 = z*z*l2;
+      float k = sign(dr)*dr*dr*x2;
+      float dd = 0.0;
+      if (sign(z)*a2*z2 > k) dd = sqrt(x2 + z2)*il2 - rr.y;
+      else if (sign(y)*a2*y2 < k) dd = sqrt(x2 + y2)*il2 - rr.x;
+      else dd = (sqrt(x2*a2*il2) + y*dr)*il2 - rr.x;
+      best = min(best, dd);
+    }
+  }
+  return best;
+}` },
+
   // A profile is the other one whose data cannot travel in the uniform block,
   // and it does not need to: an outline is a few hundred vec2s, and the
   // distance to a polygon is a loop over its edges.
@@ -291,6 +345,53 @@ function profileDecls(profiles, count) {
     s += emitProfile(i, loops.length ? loops : DEFAULT_OUTLINE);
   }
   return s;
+}
+
+// One wire slot's function: GLSL.wire.src is the definition, and this is that
+// same loop with its segments unrolled, for the same WebGL2 reason profiles
+// are unrolled. The round-cone body is longer than an edge test, so the macro
+// earns more here than it does there.
+const DEFAULT_WIRE = [[[-10, 0, 0, 2], [10, 0, 0, 1]]];
+function wireDecls(wires, count) {
+  const list = wires || [];
+  const n = Math.max(count | 0, list.length, 1);
+  let s = '';
+  for (let i = 0; i < n; i++) {
+    const wr = list[i];
+    const lines = ((wr && wr.lines) || []).filter(l => l && l.length >= 2);
+    s += emitWire(i, lines.length ? lines : DEFAULT_WIRE);
+  }
+  return s;
+}
+function emitWire(i, lines) {
+  const f = (v) => (Number.isFinite(v) ? v : 0).toPrecision(8);
+  let body = '';
+  for (const line of lines)
+    for (let a = 1; a < line.length; a++) {
+      const A = line[a - 1], B = line[a];
+      if (Math.hypot(B[0] - A[0], B[1] - A[1], B[2] - A[2]) < 1e-12) continue;
+      body += `  S(vec3(${f(A[0])},${f(A[1])},${f(A[2])}),`
+            + `vec3(${f(B[0])},${f(B[1])},${f(B[2])}),`
+            + `${f(A[3] === undefined ? 1 : A[3])},${f(B[3] === undefined ? 1 : B[3])});\n`;
+    }
+  return `float pWire${i}(vec3 p, vec3 d){
+  float best = 1e18;
+#define S(A, B, RA, RB) { vec3 ba = (B) - (A), pa = p - (A); \\
+  float l2 = dot(ba, ba), dr = (RA) - (RB), a2 = l2 - dr*dr; \\
+  if (a2 <= 0.0) { best = min(best, min(length(pa) - (RA), length(p - (B)) - (RB))); } \\
+  else { \\
+    float il2 = 1.0/l2, y = dot(pa, ba), z = y - l2; \\
+    vec3 cx = pa*l2 - ba*y; \\
+    float x2 = dot(cx, cx), y2 = y*y*l2, z2 = z*z*l2, k = sign(dr)*dr*dr*x2; \\
+    float dd; \\
+    if (sign(z)*a2*z2 > k) dd = sqrt(x2 + z2)*il2 - (RB); \\
+    else if (sign(y)*a2*y2 < k) dd = sqrt(x2 + y2)*il2 - (RA); \\
+    else dd = (sqrt(x2*a2*il2) + y*dr)*il2 - (RA); \\
+    best = min(best, dd); } }
+${body}#undef S
+  return best;
+}
+`;
 }
 
 // An empty slot is a 20 x 20 mm square, not nothing. A node can name a profile
@@ -392,21 +493,24 @@ function sceneBody(plan, opts) {
 // The complete `float map(vec3 P)` for a plan: library, outlines, fold.
 function mapSource(plan, profiles, opts) {
   const { body, at } = sceneBody(plan, opts);
-  const src = `${library()}\n${profileDecls(profiles, maxProfileSlot(plan))}\n`
+  const wires = (opts && opts.wires) || [];
+  const src = `${library()}\n${profileDecls(profiles, maxSlot(plan, 'profile'))}\n`
+    + `${wireDecls(wires, maxSlot(plan, 'wire'))}\n`
     + `float map(vec3 P){\n  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n`;
   return { src, at };
 }
 
-// How many profile slots the shader must be able to name. A node may refer to
-// a slot the library has not filled in yet, and an undeclared pProfileN is a
-// compile error rather than an empty shape.
-function maxProfileSlot(plan) {
+// How many slots of a slotted primitive the shader must be able to name. A
+// node may refer to a slot the library has not filled in yet, and an
+// undeclared pProfileN or pWireN is a compile error rather than an empty shape.
+function maxSlot(plan, t) {
   let n = 1;
   for (const part of plan || [])
     for (const q of part.nodes || [])
-      if (q.t === 'profile') n = Math.max(n, (q.fi | 0) + 1);
+      if (q.t === t) n = Math.max(n, (q.fi | 0) + 1);
   return n;
 }
+const maxProfileSlot = (plan) => maxSlot(plan, 'profile');
 
 function packPlan(at, opts) {
   opts = opts || {};
@@ -430,8 +534,8 @@ function packPlan(at, opts) {
   return uData;
 }
 
-const SinterFormGLSL = { GLSL, library, call, samplerDecls, profileDecls,
-                         sceneBody, mapSource, maxProfileSlot, packPlan,
+const SinterFormGLSL = { GLSL, library, call, samplerDecls, profileDecls, wireDecls,
+                         sceneBody, mapSource, maxProfileSlot, maxSlot, packPlan,
                          KEYS: Object.keys(GLSL) };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterFormGLSL;
 root.SinterFormGLSL = SinterFormGLSL;

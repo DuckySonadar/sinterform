@@ -1600,6 +1600,44 @@ Sketch3D.prototype.shape = function (face, height, opts) {
   };
 };
 
+// The drawn curves as a *shape*, the way `shape()` does for a face: something
+// a renderer can raymarch beside a sphere rather than a closure it has to
+// sample onto a grid.
+//
+//   const { wire, node } = S.wireShape(2);
+//   SinterForm.wires = [wire];
+//
+// `radius` may be a number, or a function of t in [0, 1] along each curve, so
+// the thickness can vary as it goes -- which the kernel's `wire` primitive
+// draws with a round cone per segment rather than a lerped radius, because
+// those are not the same solid.
+//
+// Both halves are plain data, which is why this can live here without this
+// file knowing that sinterform.js exists.
+Sketch3D.prototype.wireShape = function (radius, opts) {
+  opts = opts || {};
+  const rf = typeof radius === 'function' ? radius
+           : () => (radius === undefined ? 1 : radius);
+  const lines = [];
+  for (const e of this.ents) {
+    if (e.dead || e.construction || CURVE_KINDS.indexOf(e.k) < 0) continue;
+    const pts = this.sample(e.id, opts.tol);
+    if (!pts || pts.length < 2) continue;
+    lines.push(pts.map((p, i) => [p[0], p[1], p[2], rf(i / (pts.length - 1))]));
+  }
+  if (!lines.length) throw new Error('wireShape wants at least one drawn curve');
+  let h = [0, 0, 0];
+  for (const l of lines)
+    for (const p of l)
+      for (let k = 0; k < 3; k++) h[k] = Math.max(h[k], Math.abs(p[k]) + p[3]);
+  return {
+    wire: { name: opts.name || 'sketch3d wire', lines },
+    node: { t: 'wire', on: true, op: 'add', k: 0, b: 0, round: 0,
+            mx: false, my: false, mz: false,
+            p: [0, 0, 0], r: [0, 0, 0], d: h, fi: opts.fi || 0 }
+  };
+};
+
 // Distance to a segment, which is all a wire is made of.
 function segDist(a, b, px, py, pz) {
   const ex = b[0] - a[0], ey = b[1] - a[1], ez = b[2] - a[2];
