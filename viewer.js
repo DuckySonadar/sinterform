@@ -161,8 +161,8 @@ function fragSource(plan) {
   // A profile's outline is compiled into the shader rather than uploaded, so
   // the source depends on the document's profiles as well as on the plan.
   return { src: PREAMBLE + `${GL.library()}\n`
-    + `${GL.profileDecls(SF.profiles, GL.maxSlot(view.plan, 'profile'))}\n`
-    + `${GL.wireDecls(SF.wires, GL.maxSlot(view.plan, 'wire'))}\n`
+    + `${GL.slotDecls('profile', slotsOf('profile', SF.profiles), GL.maxSlot(view.plan, 'profile'))}\n`
+    + `${GL.slotDecls('wire', slotsOf('wire', SF.wires), GL.maxSlot(view.plan, 'wire'))}\n`
     + `float map(vec3 P){\n`
     + `  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n` + TAIL, at };
 }
@@ -448,6 +448,12 @@ void main(){
 // How many profile slots the shader must be able to name. A node may refer to
 // a slot the library has not filled in yet, and an undeclared pProfileN is a
 // compile error rather than an empty shape.
+// The kernel packs a slotted primitive's data; glsl.js turns data into source.
+// The viewer's whole part in it is this line.
+function slotsOf(t, list) {
+  return SF.slotList(t, list, GL.maxSlot(view.plan, t));
+}
+
 function maxProfileSlot(plan) {
   let n = 1;
   for (const body of plan || [])

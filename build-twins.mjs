@@ -539,6 +539,132 @@ function emit(fn) {
   };
 }
 
+// ------------------------------------------------------- the GLSL backend ----
+// The second emitter on the same AST. The first turns a primitive into
+// JavaScript; this one turns a *slotted* primitive -- one whose shape is a list
+// of items on the document -- into the unrolled GLSL a WebGL2 shader can run.
+//
+// This exists because the unrolled form used to be hand-written beside the
+// rolled one: two expressions of the same algorithm, in the same language,
+// which is exactly the duplication the JS twins no longer have. Now the rolled
+// source is the only statement of what a wire or a profile is, and both the
+// JavaScript and the straight-line GLSL are derived from it.
+//
+// The shape of the output is forced by WebGL2, not chosen: dynamic indexing
+// into a const array expands to a select chain per read, so the items become
+// straight-line code. What is emitted is the loop body once, as a #define, and
+// one invocation per item -- so the *body* is written once here and the data is
+// whatever the caller has.
+function glslOf(node, subst) {
+  const g = (n) => glslOf(n, subst);
+  switch (node.n) {
+    case 'num': return node.v;
+    case 'var': return node.v;
+    case 'neg': return `(-${g(node.a)})`;
+    case 'not': return `(!${g(node.a)})`;
+    case 'swz': return `${g(node.a)}.${node.s}`;
+    case 'tern': return `(${g(node.c)} ? ${g(node.a)} : ${g(node.b)})`;
+    case 'bin': return `(${g(node.a)} ${node.o} ${g(node.b)})`;
+    case 'call': {
+      const hit = subst && subst(node);
+      if (hit !== undefined && hit !== null) return hit;
+      return `${node.f}(${node.args.map(g).join(', ')})`;
+    }
+    default: throw new Error(`cannot print ${node.n} as GLSL`);
+  }
+}
+
+function glslStmt(s, subst, pad) {
+  const g = (n) => glslOf(n, subst);
+  const p = pad || '  ';
+  switch (s.n) {
+    case 'decl':
+      return s.decls.map(d => `${p}${s.t} ${d.name}`
+        + (d.init ? ` = ${g(d.init)}` : '') + ';').join('\n');
+    case 'assign':
+      return `${p}${s.lv.name}${s.lv.s ? '.' + s.lv.s : ''} ${s.op} ${g(s.e)};`;
+    case 'ret': return `${p}return ${g(s.e)};`;
+    case 'if': {
+      let out = `${p}if (${g(s.c)}) {\n${glslStmt(s.then, subst, p + '  ')}\n${p}}`;
+      if (s.els) out += ` else {\n${glslStmt(s.els, subst, p + '  ')}\n${p}}`;
+      return out;
+    }
+    case 'block': return s.body.map(b => glslStmt(b, subst, p)).join('\n');
+    case 'for':
+      throw new Error('a nested loop cannot be unrolled');
+    default: throw new Error(`cannot print statement ${s.n} as GLSL`);
+  }
+}
+
+// Split a slotted primitive into what runs once and what runs per item, and
+// name the data each item supplies. The count intrinsic disappears -- after
+// unrolling the count is how many invocations were written.
+function unroller(key, fn) {
+  const loops = fn.body.filter(s => s.n === 'for');
+  if (loops.length !== 1)
+    throw new Error(`${key}: a slotted primitive needs exactly one loop to unroll`);
+  const loop = loops[0];
+  const idx = loop.init.decls && loop.init.decls[0] && loop.init.decls[0].name;
+
+  // Every intrinsic read inside the loop becomes a macro parameter. Order is
+  // the order they are first met, which is also the order the kernel packs its
+  // item data in -- one convention, stated in both places and checked by
+  // check-glsl.
+  const params = [];
+  const seen = new Map();
+  const paramOf = (node) => {
+    if (!(node.f in INTRINSICS)) return null;
+    const spec = INTRINSICS[node.f];
+    if (spec.t === 'int') return null;              // the count; gone after unrolling
+    const tag = `${node.f}(${node.args.map(a => a.n === 'var' ? a.v : '?').join(',')})`;
+    if (!seen.has(tag)) {
+      const name = node.f.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+      seen.set(tag, name);
+      params.push({ name, width: WIDTH[spec.t], type: spec.t });
+    }
+    return seen.get(tag);
+  };
+  // first pass names them, second prints with the names substituted
+  const walk = (s) => {
+    const ex = (n) => {
+      if (!n || typeof n !== 'object') return;
+      if (n.n === 'call') { paramOf(n); n.args.forEach(ex); return; }
+      for (const k of ['a', 'b', 'c', 'e', 'init']) if (n[k]) ex(n[k]);
+      if (n.args) n.args.forEach(ex);
+    };
+    if (s.n === 'decl') s.decls.forEach(d => d.init && ex(d.init));
+    else if (s.n === 'assign') ex(s.e);
+    else if (s.n === 'ret') ex(s.e);
+    else if (s.n === 'if') { ex(s.c); walk(s.then); if (s.els) walk(s.els); }
+    else if (s.n === 'block') s.body.forEach(walk);
+  };
+  walk(loop.body);
+
+  const subst = (node) => {
+    const nm = paramOf(node);
+    return nm === null ? undefined : nm;
+  };
+  const body = glslStmt(loop.body, subst, '  ');
+
+  // Statements outside the loop, minus the count, which no longer exists.
+  const outside = (before) => fn.body
+    .filter((s, i) => (before ? i < fn.body.indexOf(loop) : i > fn.body.indexOf(loop)))
+    .filter(s => !(s.n === 'decl' && s.decls.some(d => d.init && d.init.n === 'call'
+                   && d.init.f in INTRINSICS && INTRINSICS[d.init.f].t === 'int')))
+    .map(s => glslStmt(s, subst, '  ')).join('\n');
+
+  const args = params.map(p => p.name).join(', ');
+  const macro = `#define ITEM(${args}) {\\\n`
+    + body.split('\n').map(l => l + ' \\').join('\n').replace(/ \\$/, '') + ' }\n';
+  return {
+    params, idx,
+    pre: outside(true),
+    post: outside(false),
+    macro,
+    stride: params.reduce((a, p) => a + p.width, 0)
+  };
+}
+
 // ------------------------------------------------------------------ main ----
 const mod = { exports: {} };
 new Function('module', readFileSync(join(HERE, 'glsl.js'), 'utf8'))(mod);
@@ -546,13 +672,12 @@ const GL = mod.exports;
 
 const parts = [];
 const done = [];
+const slots = [];
 for (const key of GL.KEYS) {
   const src = GL.GLSL[key].src;
   if (!src || !src.trim()) throw new Error(`${key}: no GLSL source to translate`);
   let fns;
   try { fns = parse(src); } catch (e) { throw new Error(`${key}: ${e.message}`); }
-  // an intrinsic's own GLSL body rides along in the same source; the primitive
-  // is the one the table names
   const want = GL.GLSL[key].fn;
   const fn = fns.find(f => f.fname === want);
   if (!fn) throw new Error(`${key}: no function named ${want} in its source`);
@@ -561,7 +686,70 @@ for (const key of GL.KEYS) {
   parts.push(`  // ${fn.fname} — from GLSL.${key}.src\n`
     + `  ${key}: (${out.args.join(', ')}) => {\n${out.body}\n  },`);
   done.push(key);
+
+  // A slotted primitive also gets an unrolled GLSL form, from the same AST.
+  if (GL.GLSL[key].slotted) {
+    let u;
+    try { u = unroller(key, fn); } catch (e) { throw new Error(`${key}: ${e.message}`); }
+    slots.push({ key, fn: want, u });
+  }
 }
+
+const q = (t) => JSON.stringify(t);
+const unrollBlock = `// ---------------------------------------------------------------------------
+// GENERATED by build-twins.mjs from the rolled sources above — do not edit.
+//
+// A slotted primitive's shape is a list of items on the document, and WebGL2
+// cannot index a constant array without expanding every read into a chain of
+// selects. So the loop is unrolled: the body once as a macro, one invocation
+// per item. This table is that body, taken from the same rolled source the JS
+// twin is taken from, so the straight-line GLSL and the JavaScript cannot
+// describe different shapes.
+//
+// \`items\` is a flat array of numbers per slot, \`stride\` of them per item, laid
+// out in the order the parameters are listed. \`SinterForm.slotItems(key, obj)\`
+// packs exactly that, and supplies a default when a slot is empty — which is
+// why no default shape is written down in this file.
+// ---------------------------------------------------------------------------
+const UNROLL = {
+${slots.map(({ key, fn, u }) => `  ${key}: {
+    fn: ${q(fn)}, stride: ${u.stride}, arity: [${u.params.map(p => p.width).join(', ')}],
+    pre: ${q(u.pre)},
+    macro: ${q(u.macro)},
+    post: ${q(u.post)}
+  }`).join(',\n')}
+};
+
+// One slot's function. \`items\` is what SinterForm.slotItems returned for it.
+function slotDecl(key, i, items) {
+  const U = UNROLL[key];
+  if (!U) throw new Error('not a slotted primitive: ' + key);
+  const f = (v) => (Number.isFinite(v) ? v : 0).toPrecision(8);
+  let body = '';
+  for (let o = 0; o + U.stride <= items.length; o += U.stride) {
+    const args = [];
+    let k = o;
+    for (const w of U.arity) {
+      const c = [];
+      for (let j = 0; j < w; j++) c.push(f(items[k++]));
+      args.push(w === 1 ? c[0] : \`vec\${w}(\${c.join(',')})\`);
+    }
+    body += \`  ITEM(\${args.join(',')});\n\`;
+  }
+  return \`float \${U.fn}\${i}(vec3 p, vec3 d){\n\${U.pre}\n\${U.macro}\${body}#undef ITEM\n\${U.post}\n}\n\`;
+}
+
+// Every slot the shader must be able to name. A node may refer to a slot the
+// document has not filled in yet, and an undeclared function is a compile
+// error rather than an empty shape -- so the caller passes one \`items\` array
+// per slot, and SinterForm.slotItems turns an absent entry into the default.
+function slotDecls(key, itemsPerSlot, count) {
+  const n = Math.max(count | 0, (itemsPerSlot || []).length, 1);
+  let s = '';
+  for (let i = 0; i < n; i++) s += slotDecl(key, i, (itemsPerSlot || [])[i] || []);
+  return s;
+}
+`;
 
 const block = `// ---------------------------------------------------------------------------
 // GENERATED by build-twins.mjs from glsl.js — do not edit by hand.
@@ -571,34 +759,36 @@ const block = `// --------------------------------------------------------------
 // Run \`node build-twins.mjs\` after changing a primitive's GLSL; check-kernel
 // fails if this block is stale, and check-glsl proves the translation is
 // faithful by running both on the same points.
-//
-// \`field\` and \`profile\` are not here: one reads a sampler and one is
-// generated source with a macro. Both are hand-written below, and NOTICE
-// records why.
 // ---------------------------------------------------------------------------
 const TWINS = {
 ${parts.join('\n')}
 };
 `;
 
-const MARK_A = '// <<< generated twins';
-const MARK_B = '// >>> generated twins';
-const path = join(HERE, 'sinterform.js');
-let file = readFileSync(path, 'utf8');
-if (!file.includes(MARK_A) || !file.includes(MARK_B))
-  throw new Error(`sinterform.js is missing the ${MARK_A} / ${MARK_B} markers`);
+function splice(file, markA, markB, text) {
+  const path = join(HERE, file);
+  const src = readFileSync(path, 'utf8');
+  if (!src.includes(markA) || !src.includes(markB))
+    throw new Error(`${file} is missing the ${markA} / ${markB} markers`);
+  const a = src.indexOf(markA) + markA.length;
+  const b = src.indexOf(markB);
+  return { path, src, next: src.slice(0, a) + '\n' + text + src.slice(b) };
+}
 
-const a = file.indexOf(MARK_A) + MARK_A.length;
-const b = file.indexOf(MARK_B);
-const next = file.slice(0, a) + '\n' + block + file.slice(b);
+const outs = [
+  splice('sinterform.js', '// <<< generated twins', '// >>> generated twins', block),
+  splice('glsl.js', '// <<< generated unrollers', '// >>> generated unrollers', unrollBlock)
+];
 
 if (process.argv.includes('--check')) {
-  if (next !== file) {
-    console.error('sinterform.js is stale — run: node build-twins.mjs');
+  const stale = outs.filter(o => o.next !== o.src).map(o => o.path.split('/').pop());
+  if (stale.length) {
+    console.error(`stale, run: node build-twins.mjs   (${stale.join(', ')})`);
     process.exit(1);
   }
-  console.log(`generated twins are current (${done.length} primitives)`);
+  console.log(`generated code is current (${done.length} twins, ${slots.length} unrollers)`);
   process.exit(0);
 }
-writeFileSync(path, next);
-console.log(`wrote ${done.length} twins into sinterform.js: ${done.join(', ')}`);
+for (const o of outs) writeFileSync(o.path, o.next);
+console.log(`wrote ${done.length} twins and ${slots.length} unrollers `
+  + `(${slots.map(s => s.key).join(', ')})`);

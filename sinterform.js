@@ -142,8 +142,11 @@ function wireSegments(w) {
     for (let i = 1; i < line.length; i++) {
       const a = line[i - 1], b = line[i];
       if (Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) < 1e-12) continue;
-      e.push(a[0], a[1], a[2], a[3] === undefined ? 1 : a[3],
-             b[0], b[1], b[2], b[3] === undefined ? 1 : b[3]);
+      // laid out in the order the primitive's intrinsics are declared --
+      // segA, segB, segR -- because that is the order slotItems hands to the
+      // unroller, and one layout serving both is what keeps them in step
+      e.push(a[0], a[1], a[2], b[0], b[1], b[2],
+             a[3] === undefined ? 1 : a[3], b[3] === undefined ? 1 : b[3]);
     }
   }
   if (w) { w._segSrc = lines; w._segs = e; }
@@ -153,11 +156,34 @@ function segCount(w) { return wireSegments(w).length / 8; }
 function segAx(w, i) { return wireSegments(w)[8 * i]; }
 function segAy(w, i) { return wireSegments(w)[8 * i + 1]; }
 function segAz(w, i) { return wireSegments(w)[8 * i + 2]; }
-function segRA(w, i) { return wireSegments(w)[8 * i + 3]; }
-function segBx(w, i) { return wireSegments(w)[8 * i + 4]; }
-function segBy(w, i) { return wireSegments(w)[8 * i + 5]; }
-function segBz(w, i) { return wireSegments(w)[8 * i + 6]; }
+function segBx(w, i) { return wireSegments(w)[8 * i + 3]; }
+function segBy(w, i) { return wireSegments(w)[8 * i + 4]; }
+function segBz(w, i) { return wireSegments(w)[8 * i + 5]; }
+function segRA(w, i) { return wireSegments(w)[8 * i + 6]; }
 function segRB(w, i) { return wireSegments(w)[8 * i + 7]; }
+
+// The item data for a slotted primitive, flat, in the order that primitive's
+// intrinsics are declared -- which is the order the generated unroller reads
+// them back in. This is the kernel's half of drawing a slotted shape: it
+// constructs the data, and glsl.js turns data into source. An absent entry
+// gets the primitive's default, so an empty slot is a shape rather than a
+// compile error, and the default is written down once, here.
+function slotItems(t, obj) {
+  if (t === 'wire') return wireSegments(obj);
+  if (t === 'profile') return outlineEdges(obj);
+  throw new Error('not a slotted primitive: ' + t);
+}
+
+// `count` slots' worth, which is what a shader needs: a node may name a slot
+// the document has not filled in, and every named slot must exist as a
+// function. Absent entries come back as the primitive's default rather than as
+// nothing, so an unfilled slot draws a shape instead of failing to compile.
+function slotList(t, list, count) {
+  const n = Math.max(count | 0, (list || []).length, 1);
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(slotItems(t, (list || [])[i]));
+  return out;
+}
 
 // Half-extents of a wire, each point expanded by its own radius. Tight: the
 // furthest reach along any axis is attained at some point plus its radius.
@@ -165,7 +191,7 @@ function wireExtent(lines) {
   const e = wireSegments({ lines });
   let h = [0, 0, 0];
   for (let i = 0; i < e.length; i += 8)
-    for (const [o, r] of [[0, e[i + 3]], [4, e[i + 7]]])
+    for (const [o, r] of [[0, e[i + 6]], [3, e[i + 7]]])
       for (let k = 0; k < 3; k++) h[k] = Math.max(h[k], Math.abs(e[i + o + k]) + r);
   return h;
 }
@@ -290,10 +316,6 @@ function sampleField(f, x, y, z) {
 // Run `node build-twins.mjs` after changing a primitive's GLSL; check-kernel
 // fails if this block is stale, and check-glsl proves the translation is
 // faithful by running both on the same points.
-//
-// `field` and `profile` are not here: one reads a sampler and one is
-// generated source with a macro. Both are hand-written below, and NOTICE
-// records why.
 // ---------------------------------------------------------------------------
 const TWINS = {
   // pSphere — from GLSL.sphere.src
@@ -1046,7 +1068,7 @@ const SinterForm = {
   get wires() { return wires; },
   set wires(v) { wires = v; },
   decodeField, encodeField, sampleField,
-  polygonSDF, profileExtent, wireExtent,
+  polygonSDF, profileExtent, wireExtent, slotItems, slotList,
   smin, smax, invRot, roundSlot,
   sceneSDF, sceneBounds, surfaceNets, mesh, meshToSTL
 };

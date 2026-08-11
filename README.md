@@ -8,7 +8,7 @@ STL output. Dependency-free JavaScript.
 | --- | --- |
 | `glsl.js` | **each primitive's definition**, as GLSL, plus the two shader budgets |
 | `sinterform.js` | the kernel — those definitions translated to JS, booleans, bounds, meshing |
-| `build-twins.mjs` | the translator; `--check` fails if the generated block is stale |
+| `build-twins.mjs` | the translator: GLSL → JS twins, and GLSL → unrolled GLSL |
 | `glmesh.js` | optional: fills the mesher's grid on the GPU instead of in JS |
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
 | `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
@@ -286,8 +286,8 @@ from it by `build-twins.mjs`, into a marked block that says so. To add or change
 a primitive, write the GLSL in `glsl.js` and run:
 
 ```
-node build-twins.mjs           # rewrite the generated block
-node build-twins.mjs --check   # exit 1 if it is stale (check-kernel does this)
+node build-twins.mjs           # rewrite both generated blocks
+node build-twins.mjs --check   # exit 1 if either is stale (check-kernel does this)
 ```
 
 There is no build step for *consumers* — the generated code is committed, so
@@ -326,12 +326,41 @@ is an error, so it cannot widen by accident. Everything around them — the box
 union, the slab, the crossing count, the nearest-edge search — is ordinary GLSL
 and is generated like everything else.
 
-`profile`'s canonical source is therefore the **rolled** loop. What the GPU runs
-is `profileDecls`, which specialises that same loop by unrolling the edges; that
-is an optimisation forced by WebGL2, not a second definition, and `check-glsl`
-holds the unrolled form against the JS the rolled one generates. `library()`
-skips any source marked `spec`, since the rolled one names an `outline` type
-GLSL does not have.
+### Slotted primitives, and the second backend
+
+`profile` and `wire` have shapes that are *lists* — edges, segments — rather
+than three dims. Their canonical source is a **rolled loop** reading items
+through intrinsics, and that one source produces *both* derived forms:
+
+```
+GLSL.wire.src  ──build-twins──┬──▶  TWINS.wire        the JS twin
+   (rolled)                   └──▶  UNROLL.wire       the unrolled GLSL
+```
+
+The unrolling is forced by WebGL2 — a dynamically indexed `const` array expands
+to a select chain per read — but it is an *optimisation of the definition*, not
+a second definition. The generator's GLSL backend prints the loop body once as a
+`#define`, names each intrinsic read as a macro parameter, and `slotDecls` writes
+one invocation per item. So the body is written once, in the rolled source, and
+works for **any** data.
+
+Three parties, each doing only its own job:
+
+```js
+SinterForm.slotList('wire', SinterForm.wires, n)   // kernel: construct the data
+GL.slotDecls('wire', items)                        // glsl.js: data → shader source
+                                                   // viewer: calls the two
+```
+
+An absent slot comes back as the primitive's **default** from `slotList`, which
+is why no default shape is written down in `glsl.js` — it used to be, in both
+files, and the copies could drift.
+
+`library()` skips any source marked `spec`, since a rolled one names an
+`outline`/`polyline` type GLSL does not have.
+
+`check-kernel` runs the generator in `--check` mode over **both** files and
+names whichever is stale, so neither generated block can be hand-edited.
 
 `check-glsl.mjs` also refuses a primitive present in one file and missing from
 the other.

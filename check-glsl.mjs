@@ -96,7 +96,7 @@ const cases = KEYS.map(k => {
 
 // `profile` is baked, so the loop above skipped it -- but unlike `field` it is
 // baked into *source*, not into a texture, so its twin is checkable here and
-// nowhere else. The GLSL side is whatever `profileDecls` writes for this
+// nowhere else. The GLSL side is whatever `slotDecls` unrolls for this
 // outline; the JS side reads the same outline out of `SF.profiles`. If the
 // unrolled edge macro ever disagrees with `polygonSDF` -- a winding rule, a
 // clamp, the crossing test -- this is where it shows.
@@ -114,7 +114,7 @@ const cases = KEYS.map(k => {
     pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.7;
     pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 4.0;
   }
-  cases.push({ key: 'profile', fn: 'pProfile0', glsl: GL.profileDecls(SF.profiles),
+  cases.push({ key: 'profile', fn: 'pProfile0', glsl: GL.slotDecls('profile', [SF.slotItems('profile', SF.profiles[0])], 1),
                name: SF.PRIMS.profile.name, d, r: 0, slotted: true, pts });
 }
 
@@ -130,7 +130,7 @@ const cases = KEYS.map(k => {
     pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.9;
     pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 3.0;
   }
-  cases.push({ key: 'profileDefault', fn: 'pProfile0', glsl: GL.profileDecls([]),
+  cases.push({ key: 'profileDefault', fn: 'pProfile0', glsl: GL.slotDecls('profile', [SF.slotItems('profile', undefined)], 1),
                name: 'Profile (empty slot → default)', d, r: 0, slotted: true,
                js: (p, dd, r) => SF.PRIMS.profile.js(p, dd, r, { fi: 99 }), pts });
 }
@@ -153,7 +153,7 @@ const cases = KEYS.map(k => {
     pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.7;
     pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 2.5;
   }
-  cases.push({ key: 'wire', fn: 'pWire0', glsl: GL.wireDecls(SF.wires),
+  cases.push({ key: 'wire', fn: 'pWire0', glsl: GL.slotDecls('wire', [SF.slotItems('wire', SF.wires[0])], 1),
                name: SF.PRIMS.wire.name, d, r: 0, slotted: true, pts });
 }
 
@@ -168,7 +168,7 @@ const cases = KEYS.map(k => {
     pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 4.0;
     pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 4.0;
   }
-  cases.push({ key: 'wireDefault', fn: 'pWire0', glsl: GL.wireDecls([]),
+  cases.push({ key: 'wireDefault', fn: 'pWire0', glsl: GL.slotDecls('wire', [SF.slotItems('wire', undefined)], 1),
                name: 'Wire (empty slot → default)', d, r: 0, slotted: true,
                js: (p, dd, r) => SF.PRIMS.wire.js(p, dd, r, { fi: 99 }), pts });
 }
