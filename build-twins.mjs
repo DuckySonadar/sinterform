@@ -57,19 +57,25 @@ const INTRINSICS = {
   segR:        { t: 'vec2',  js: ['segRA($0, $1)', 'segRB($0, $1)'] },
   // one JS expression per component, so a vec2 intrinsic does not have to be
   // called twice to be taken apart
+  // A sweep's item is laid out in the order pSweep reads it, which puts the
+  // five the cull test needs first: a segment that cannot win never reads past
+  // `swCull`. The indices here, the packing in sweep.js and the macro
+  // parameters the unroller writes are one layout said three times, and
+  // check-glsl runs both ends of it on the same data.
   swCount:     { t: 'int',   js: 'swCount($0)' },
   swA:    { t: 'vec3', js: ['swf($0,$1,0)', 'swf($0,$1,1)', 'swf($0,$1,2)'] },
   swT:    { t: 'vec3', js: ['swf($0,$1,3)', 'swf($0,$1,4)', 'swf($0,$1,5)'] },
-  swU:    { t: 'vec3', js: ['swf($0,$1,6)', 'swf($0,$1,7)', 'swf($0,$1,8)'] },
-  swV:    { t: 'vec3', js: ['swf($0,$1,9)', 'swf($0,$1,10)', 'swf($0,$1,11)'] },
-  swK:    { t: 'vec2', js: ['swf($0,$1,12)', 'swf($0,$1,13)'] },
-  swTurn: { t: 'vec2', js: ['swf($0,$1,14)', 'swf($0,$1,15)'] },
-  swLS:   { t: 'vec3', js: ['swf($0,$1,16)', 'swf($0,$1,17)', 'swf($0,$1,18)'] },
-  swE:    { t: 'vec2', js: ['swf($0,$1,19)', 'swf($0,$1,20)'] },
-  swMisc: { t: 'vec3', js: ['swf($0,$1,21)', 'swf($0,$1,22)', 'swf($0,$1,23)'] },
-  swCaps: { t: 'vec3', js: ['swf($0,$1,24)', 'swf($0,$1,25)', 'swf($0,$1,26)'] },
-  swKind: { t: 'float', js: 'swf($0,$1,27)' },
-  swSect: { t: 'vec3', js: ['swf($0,$1,28)', 'swf($0,$1,29)', 'swf($0,$1,30)'] },
+  swLS:   { t: 'vec3', js: ['swf($0,$1,6)', 'swf($0,$1,7)', 'swf($0,$1,8)'] },
+  swMisc: { t: 'vec3', js: ['swf($0,$1,9)', 'swf($0,$1,10)', 'swf($0,$1,11)'] },
+  swCull: { t: 'float', js: 'swf($0,$1,12)' },
+  swU:    { t: 'vec3', js: ['swf($0,$1,13)', 'swf($0,$1,14)', 'swf($0,$1,15)'] },
+  swV:    { t: 'vec3', js: ['swf($0,$1,16)', 'swf($0,$1,17)', 'swf($0,$1,18)'] },
+  swK:    { t: 'vec2', js: ['swf($0,$1,19)', 'swf($0,$1,20)'] },
+  swTurn: { t: 'vec2', js: ['swf($0,$1,21)', 'swf($0,$1,22)'] },
+  swE:    { t: 'vec2', js: ['swf($0,$1,23)', 'swf($0,$1,24)'] },
+  swCaps: { t: 'vec3', js: ['swf($0,$1,25)', 'swf($0,$1,26)', 'swf($0,$1,27)'] },
+  swKind: { t: 'float', js: 'swf($0,$1,28)' },
+  swSect: { t: 'vec3', js: ['swf($0,$1,29)', 'swf($0,$1,30)', 'swf($0,$1,31)'] },
   // `keep` marks an intrinsic that stays a *call* on the GLSL side instead of
   // becoming unrolled data: the polygon section is a whole 2D sketch, and GLSL
   // cannot turn a slot number into a function name, so glsl.js emits a small
@@ -82,11 +88,19 @@ const INTRINSICS = {
 // generated `let n` beside a parameter `n` is a SyntaxError rather than a
 // wrong answer -- but only by luck, so the name is put out of reach instead.
 const NODE_ARG = '$node';
+// A slotted primitive's handle is the *resolved* item array, not the document
+// entry: the outline's edges, the wire's segments, the sweep's packed
+// segments, with an empty slot already turned into the primitive's default.
+// That is what the shader's handle is -- the data is compiled into the
+// function before it ever runs -- and it is one lookup per call here instead
+// of one per read, which on a sweep is thirty-two reads an item. A field is
+// the exception because its handle really is the whole object: the twin needs
+// the grid's dimensions as well as its samples.
 const OPAQUE = {
   sampler3D: `fields[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
-  outline:   `profiles[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
-  polyline:  `wires[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
-  sweeppath: `sweeps[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`
+  outline:   `outlineEdges(profiles[(${NODE_ARG} && ${NODE_ARG}.fi) || 0])`,
+  polyline:  `wireSegments(wires[(${NODE_ARG} && ${NODE_ARG}.fi) || 0])`,
+  sweeppath: `sweepSegs(sweeps[(${NODE_ARG} && ${NODE_ARG}.fi) || 0])`
 };
 
 // ---------------------------------------------------------------- tokens ----

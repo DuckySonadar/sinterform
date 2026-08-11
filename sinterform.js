@@ -158,15 +158,20 @@ function wireSegments(w) {
   if (w) { w._segSrc = lines; w._segs = e; }
   return e;
 }
-function segCount(w) { return wireSegments(w).length / 8; }
-function segAx(w, i) { return wireSegments(w)[8 * i]; }
-function segAy(w, i) { return wireSegments(w)[8 * i + 1]; }
-function segAz(w, i) { return wireSegments(w)[8 * i + 2]; }
-function segBx(w, i) { return wireSegments(w)[8 * i + 3]; }
-function segBy(w, i) { return wireSegments(w)[8 * i + 4]; }
-function segBz(w, i) { return wireSegments(w)[8 * i + 5]; }
-function segRA(w, i) { return wireSegments(w)[8 * i + 6]; }
-function segRB(w, i) { return wireSegments(w)[8 * i + 7]; }
+// The reads themselves, on the flat array above. A twin is handed that array
+// once, when the primitive is entered -- the same thing the shader is handed,
+// which has its items compiled in before it runs -- so these are an index and
+// nothing else. Resolving the slot inside each read instead put the default
+// lookup and the cache check on the hottest path in the kernel.
+function segCount(e) { return e.length / 8; }
+function segAx(e, i) { return e[8 * i]; }
+function segAy(e, i) { return e[8 * i + 1]; }
+function segAz(e, i) { return e[8 * i + 2]; }
+function segBx(e, i) { return e[8 * i + 3]; }
+function segBy(e, i) { return e[8 * i + 4]; }
+function segBz(e, i) { return e[8 * i + 5]; }
+function segRA(e, i) { return e[8 * i + 6]; }
+function segRB(e, i) { return e[8 * i + 7]; }
 
 // The item data for a slotted primitive, flat, in the order that primitive's
 // intrinsics are declared -- which is the order the generated unroller reads
@@ -178,23 +183,25 @@ function segRB(w, i) { return wireSegments(w)[8 * i + 7]; }
 // transport, holonomy and the corner axis -- construction that belongs to
 // sweep.js and not to an evaluator. An empty slot is a plain straight run, so
 // the primitive still draws something before an application feeds it.
-const SWEEP_STRIDE = 31;
+const SWEEP_STRIDE = 32;
 const DEFAULT_SWEEP = (() => {
-  const L = 20, e = new Array(SWEEP_STRIDE).fill(0);
-  e[0] = -10; e[3] = 1; e[6] = 0; e[7] = 1; e[11] = 1;      // A, T=+x, U=+y, V=+z
-  e[12] = 0; e[13] = 1;                                      // turn axis, unused
-  e[16] = L; e[17] = 1; e[18] = 1;                           // span, scale 1 -> 1
-  e[21] = 0; e[22] = 1; e[23] = 0;                           // dw, taper, reach
-  e[24] = 1; e[25] = 1; e[26] = 0;                           // capA, capB, no join
-  e[27] = 0; e[28] = 3;                                      // circle, r = 3
+  const L = 20, e = new Float64Array(SWEEP_STRIDE);
+  e[0] = -10; e[3] = 1;                       // A, T = +x
+  e[6] = L; e[7] = 1; e[8] = 1;               // span, scale 1 -> 1
+  e[10] = 1;                                  // no roll, taper 1, nothing to reach
+  e[12] = 3;                                  // cull radius: the section's own
+  e[14] = 1; e[18] = 1;                       // U = +y, V = +z
+  e[20] = 1;                                  // turn axis, unused: no join here
+  e[25] = 1; e[26] = 1;                       // capped both ends, no rounded joint
+  e[29] = 3;                                  // kind 0, circle, r = 3
   return e;
 })();
 function sweepSegs(w) {
   const s = w && w.segs;
   return (s && s.length >= SWEEP_STRIDE) ? s : DEFAULT_SWEEP;
 }
-function swCount(w) { return Math.floor(sweepSegs(w).length / SWEEP_STRIDE); }
-function swf(w, i, k) { return sweepSegs(w)[SWEEP_STRIDE * i + k]; }
+function swCount(e) { return Math.floor(e.length / SWEEP_STRIDE); }
+function swf(e, i, k) { return e[SWEEP_STRIDE * i + k]; }
 
 // The JS half of the sweep's polygon-section hook: a slot number and a point
 // in the section plane. Same outlines, same polygonSDF, same default -- a
@@ -251,11 +258,11 @@ function outlineEdges(o) {
   if (o) { o._edgeSrc = loops; o._edges = e; }
   return e;
 }
-function edgeCount(o) { return outlineEdges(o).length / 4; }
-function edgeAx(o, i) { return outlineEdges(o)[4 * i]; }
-function edgeAy(o, i) { return outlineEdges(o)[4 * i + 1]; }
-function edgeBx(o, i) { return outlineEdges(o)[4 * i + 2]; }
-function edgeBy(o, i) { return outlineEdges(o)[4 * i + 3]; }
+function edgeCount(e) { return e.length / 4; }
+function edgeAx(e, i) { return e[4 * i]; }
+function edgeAy(e, i) { return e[4 * i + 1]; }
+function edgeBx(e, i) { return e[4 * i + 2]; }
+function edgeBy(e, i) { return e[4 * i + 3]; }
 
 // What `texture()` does to a field, in JavaScript. `u`, `v`, `w` are the
 // texture's own coordinates in its own order -- z, y, x -- and the result is
@@ -593,7 +600,7 @@ const TWINS = {
   },
   // pWire — from GLSL.wire.src
   wire: (p, d, r, $node) => {
-    const w = wires[($node && $node.fi) || 0];
+    const w = wireSegments(wires[($node && $node.fi) || 0]);
     let p_0 = p[0], p_1 = p[1], p_2 = p[2];
     let d_0 = d[0], d_1 = d[1], d_2 = d[2];
     let best = 1e18;
@@ -637,7 +644,7 @@ const TWINS = {
   },
   // pSweep — from GLSL.sweep.src
   sweep: (p, d, r, $node) => {
-    const w = sweeps[($node && $node.fi) || 0];
+    const w = sweepSegs(sweeps[($node && $node.fi) || 0]);
     let p_0 = p[0], p_1 = p[1], p_2 = p[2];
     let d_0 = d[0], d_1 = d[1], d_2 = d[2];
     let best = 1e18;
@@ -646,82 +653,84 @@ const TWINS = {
     for (; (i < n);) {
       let A_0 = swf(w,i,0), A_1 = swf(w,i,1), A_2 = swf(w,i,2);
       let T_0 = swf(w,i,3), T_1 = swf(w,i,4), T_2 = swf(w,i,5);
-      let U_0 = swf(w,i,6), U_1 = swf(w,i,7), U_2 = swf(w,i,8);
-      let V_0 = swf(w,i,9), V_1 = swf(w,i,10), V_2 = swf(w,i,11);
-      let K_0 = swf(w,i,12), K_1 = swf(w,i,13);
-      let TC_0 = swf(w,i,14), TC_1 = swf(w,i,15);
-      let LS_0 = swf(w,i,16), LS_1 = swf(w,i,17), LS_2 = swf(w,i,18);
-      let E_0 = swf(w,i,19), E_1 = swf(w,i,20);
-      let M_0 = swf(w,i,21), M_1 = swf(w,i,22), M_2 = swf(w,i,23);
-      let C_0 = swf(w,i,24), C_1 = swf(w,i,25), C_2 = swf(w,i,26);
-      let kind = swf(w,i,27);
-      let sp_0 = swf(w,i,28), sp_1 = swf(w,i,29), sp_2 = swf(w,i,30);
+      let LS_0 = swf(w,i,6), LS_1 = swf(w,i,7), LS_2 = swf(w,i,8);
+      let M_0 = swf(w,i,9), M_1 = swf(w,i,10), M_2 = swf(w,i,11);
+      let cull = swf(w,i,12);
       let pa_0 = (p_0 - A_0), pa_1 = (p_1 - A_1), pa_2 = (p_2 - A_2);
       let proj = (pa_0*T_0 + pa_1*T_1 + pa_2*T_2);
-      const t0 = (proj < 0.0);
-      const t1 = (proj > LS_0);
-      let t = (t0 ? 0.0 : (t1 ? 1.0 : (proj / LS_0)));
-      let oStart = (-(proj + E_0));
-      let oEnd = (proj - (LS_0 + E_1));
-      let atA = (oStart > oEnd);
-      let past = (atA ? oStart : oEnd);
-      const t2 = (C_0 > 0.5);
-      const t3 = (C_1 > 0.5);
-      let capped = Math.max((t2 ? oStart : (-1e30)), (t3 ? oEnd : (-1e30)));
-      let s = (LS_1 + ((LS_2 - LS_1) * t));
-      let u0 = (pa_0*U_0 + pa_1*U_1 + pa_2*U_2);
-      let v0 = (pa_0*V_0 + pa_1*V_1 + pa_2*V_2);
-      let u = u0;
-      let v = v0;
-      if ((M_0 != 0.0)) {
-        let a = (M_0 * t);
-        let ca = Math.cos(a);
-        let sa = Math.sin(a);
-        u = ((u0 * ca) + (v0 * sa));
-        v = ((v0 * ca) - (u0 * sa));
-      }
-      const t4 = (s > 1e-9);
-      let d2 = (t4 ? (sweepSection(kind, sp_0, sp_1, sp_2, (u / s), (v / s)) * s) : Math.hypot(u, v));
-      let raw;
-      if ((past > 0.0)) {
-        const t5 = (d2 <= 0.0);
-        raw = (t5 ? past : Math.hypot(d2, past));
-      } else {
-        raw = Math.max(d2, capped);
-      }
-      best = Math.min(best, (raw / M_1));
-      if ((C_2 > 0.5)) {
-        let oJ = (proj - LS_0);
-        if (((Math.hypot(u0, v0, oJ) - M_2) < (best * M_1))) {
-          let uj = u0;
-          let vj = v0;
-          if ((M_0 != 0.0)) {
-            let ca = Math.cos(M_0);
-            let sa = Math.sin(M_0);
-            uj = ((u0 * ca) + (v0 * sa));
-            vj = ((v0 * ca) - (u0 * sa));
-          }
-          let sJ = LS_2;
-          let pk = ((uj * K_0) + (vj * K_1));
-          let pm = ((vj * K_0) - (uj * K_1));
-          let beta;
-          let off;
-          if ((oJ < 0.0)) {
-            beta = pm;
-            off = oJ;
-          } else {
-            if ((((pm * TC_1) - (oJ * TC_0)) >= 0.0)) {
-              beta = Math.hypot(pm, oJ);
-              off = 0.0;
-            } else {
-              beta = ((pm * TC_0) + (oJ * TC_1));
-              off = ((oJ * TC_0) - (pm * TC_1));
+      let q = Math.min(Math.max(proj, 0.0), LS_0);
+      if (((Math.hypot((pa_0 - (T_0 * q)), (pa_1 - (T_1 * q)), (pa_2 - (T_2 * q))) - cull) < (best * M_1))) {
+        let U_0 = swf(w,i,13), U_1 = swf(w,i,14), U_2 = swf(w,i,15);
+        let V_0 = swf(w,i,16), V_1 = swf(w,i,17), V_2 = swf(w,i,18);
+        let K_0 = swf(w,i,19), K_1 = swf(w,i,20);
+        let TC_0 = swf(w,i,21), TC_1 = swf(w,i,22);
+        let E_0 = swf(w,i,23), E_1 = swf(w,i,24);
+        let C_0 = swf(w,i,25), C_1 = swf(w,i,26), C_2 = swf(w,i,27);
+        let kind = swf(w,i,28);
+        let sp_0 = swf(w,i,29), sp_1 = swf(w,i,30), sp_2 = swf(w,i,31);
+        let t = (q / LS_0);
+        let oStart = (-(proj + E_0));
+        let oEnd = (proj - (LS_0 + E_1));
+        let atA = (oStart > oEnd);
+        let past = (atA ? oStart : oEnd);
+        const t0 = (C_0 > 0.5);
+        const t1 = (C_1 > 0.5);
+        let capped = Math.max((t0 ? oStart : (-1e30)), (t1 ? oEnd : (-1e30)));
+        let s = (LS_1 + ((LS_2 - LS_1) * t));
+        let u0 = (pa_0*U_0 + pa_1*U_1 + pa_2*U_2);
+        let v0 = (pa_0*V_0 + pa_1*V_1 + pa_2*V_2);
+        let u = u0;
+        let v = v0;
+        if ((M_0 != 0.0)) {
+          let a = (M_0 * t);
+          let ca = Math.cos(a);
+          let sa = Math.sin(a);
+          u = ((u0 * ca) + (v0 * sa));
+          v = ((v0 * ca) - (u0 * sa));
+        }
+        const t2 = (s > 1e-9);
+        let d2 = (t2 ? (sweepSection(kind, sp_0, sp_1, sp_2, (u / s), (v / s)) * s) : Math.hypot(u, v));
+        let raw;
+        if ((past > 0.0)) {
+          const t3 = (d2 <= 0.0);
+          raw = (t3 ? past : Math.hypot(d2, past));
+        } else {
+          raw = Math.max(d2, capped);
+        }
+        best = Math.min(best, (raw / M_1));
+        if ((C_2 > 0.5)) {
+          let oJ = (proj - LS_0);
+          if (((Math.hypot(u0, v0, oJ) - M_2) < (best * M_1))) {
+            let uj = u0;
+            let vj = v0;
+            if ((M_0 != 0.0)) {
+              let ca = Math.cos(M_0);
+              let sa = Math.sin(M_0);
+              uj = ((u0 * ca) + (v0 * sa));
+              vj = ((v0 * ca) - (u0 * sa));
             }
+            let sJ = LS_2;
+            let pk = ((uj * K_0) + (vj * K_1));
+            let pm = ((vj * K_0) - (uj * K_1));
+            let beta;
+            let off;
+            if ((oJ < 0.0)) {
+              beta = pm;
+              off = oJ;
+            } else {
+              if ((((pm * TC_1) - (oJ * TC_0)) >= 0.0)) {
+                beta = Math.hypot(pm, oJ);
+                off = 0.0;
+              } else {
+                beta = ((pm * TC_0) + (oJ * TC_1));
+                off = ((oJ * TC_0) - (pm * TC_1));
+              }
+            }
+            let p2 = (sweepSection(kind, sp_0, sp_1, sp_2, (((pk * K_0) - (beta * K_1)) / sJ), (((pk * K_1) + (beta * K_0)) / sJ)) * sJ);
+            const t4 = (off == 0.0);
+            let c = ((t4 ? p2 : Math.hypot(Math.max(p2, 0.0), Math.abs(off))) / M_1);
+            best = Math.min(best, c);
           }
-          let p2 = (sweepSection(kind, sp_0, sp_1, sp_2, (((pk * K_0) - (beta * K_1)) / sJ), (((pk * K_1) + (beta * K_0)) / sJ)) * sJ);
-          const t6 = (off == 0.0);
-          let c = ((t6 ? p2 : Math.hypot(Math.max(p2, 0.0), Math.abs(off))) / M_1);
-          best = Math.min(best, c);
         }
       }
       i += 1;
@@ -730,7 +739,7 @@ const TWINS = {
   },
   // pProfile — from GLSL.profile.src
   profile: (p, d, r, $node) => {
-    const o = profiles[($node && $node.fi) || 0];
+    const o = outlineEdges(profiles[($node && $node.fi) || 0]);
     let p_0 = p[0], p_1 = p[1], p_2 = p[2];
     let d_0 = d[0], d_1 = d[1], d_2 = d[2];
     let dd = 1e18;

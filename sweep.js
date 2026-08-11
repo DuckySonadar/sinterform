@@ -56,9 +56,28 @@
  * bend folds through itself. Both produce a surface with bites taken out of
  * it, which reads as a meshing bug and is not one.
  *
- * So this takes the union, over every segment, every time. The cost is O(path
- * segments) per sample rather than O(1). For a mesher that is affordable and
- * for a raymarcher it is the thing to watch.
+ * So this takes the union over every segment. What it does not do is
+ * *evaluate* every segment. Everything a segment can contribute -- its prism,
+ * its caps, a miter's run-on, the fill at its joint -- lies within a radius of
+ * that segment's own axis which is known when the segment is built. One
+ * subtraction and a square root say whether it could beat the running minimum,
+ * and on a path of any length most segments cannot. What gets skipped is a
+ * term that would have lost, so the field is the same field, to the bit, and
+ * check-sweep holds it against the un-culled union to say so.
+ *
+ * That leaves the order the terms are taken in, which decides how quickly the
+ * running minimum gets tight enough to cull against. End to end is the bad
+ * order: a point beside the middle of the path is far from the first segment,
+ * so nothing is skipped until the near ones arrive. They are visited middle
+ * first instead, then the quarters, then the eighths. On the viewer's own
+ * sweep at full sampling that is 11 segments of 48 evaluated per sample,
+ * against 28 in path order and 9.5 for an oracle that starts out knowing the
+ * answer.
+ *
+ * So the cost is the handful of segments actually near the point, plus one
+ * cheap test each for the rest -- affordable for a mesher, and the thing to
+ * watch for a raymarcher, where the shader carries one unrolled copy of the
+ * body per segment whether it runs or not.
  *
  * ----------------------------------------------------------------------
  * What is exact, and what is not
@@ -155,6 +174,26 @@ const PROFILES = {
   halfCircle: (r) => Object.assign((u, v) => Math.max(Math.hypot(u, v) - r, -v),
                                    { radius: r })
 };
+
+// Indices 0..n-1, middle first, then the middle of each half, and so on --
+// level by level, so the first few entries are spread across the whole range
+// rather than bunched at one end. This is the order the segments are evaluated
+// and packed in; see the note at the evaluator.
+function midFirst(n) {
+  const out = [];
+  let level = [[0, n - 1]];
+  while (level.length) {
+    const next = [];
+    for (const [a, b] of level) {
+      if (a > b) continue;
+      const m = (a + b) >> 1;
+      out.push(m);
+      next.push([a, m - 1], [m + 1, b]);
+    }
+    level = next;
+  }
+  return out;
+}
 
 // How far the profile reaches from the path. Needed for bounds and for the
 // taper correction; measured rather than assumed if the profile did not say.
@@ -366,25 +405,61 @@ function along(path, profile, opts) {
     // through, and the neighbour covers that ground anyway
     const kB = kl < 1e-9 ? [0, 1] : [dot3(kk, U) / kl, dot3(kk, V) / kl];
 
+    // How far this segment's material can get from its own axis: the section
+    // at its widest, plus however far a miter runs the ends on. Everything the
+    // segment answers for is inside that -- the prism, its caps, and the fill
+    // at the joint, which lives within a section radius of an endpoint -- so
+    // it is what the evaluator culls against, and it is exact for a section
+    // that declared its radius. One that did not gets `profileRadius`'s
+    // measurement, which is the same number the bounds have always used.
+    const cull = R * sHi + Math.max(e0, e1);
+
     seg.push({ ax: a[0], ay: a[1], az: a[2],
                tx: T[0], ty: T[1], tz: T[2],
                ux: U[0], uy: U[1], uz: U[2],
                vx: V[0], vy: V[1], vz: V[2],
                k1u: kB[0], k1v: kB[1],
                turnC: dot3(T, tan[ni]), turnS: kl,
-               round1: !capB, reach1: R * sB,
+               round1: !capB, reach1: R * sB, cull,
                L, sA, sB, capA, capB, e0, e1, dw,
                taper: Math.sqrt(1 + slope * slope + roll * roll) });
   }
 
+  // The order the union is taken in, which is not the order the path was
+  // drawn in. A cull can only drop a segment that loses to what `best` already
+  // holds, so how quickly `best` becomes tight decides how much of the path is
+  // ever touched. Walking the path end to end makes that slow: a point beside
+  // the middle of the path is a long way from the first segment, so `best`
+  // stays large and half the path gets evaluated before the near segments
+  // arrive. Visiting the middle first, then the quarters, then the eighths,
+  // puts a segment near any point of the path within the first few terms.
+  //
+  // Measured on the viewer's own sweep at full sampling: 28 of 48 segments
+  // evaluated per sample in path order, 11 in this one, against 9.5 for an
+  // oracle that starts out knowing the answer.
+  //
+  // It cannot change the field. Reordering a min reorders nothing -- the same
+  // terms are compared -- and what the cull drops is what would have lost, so
+  // this is the same number arrived at sooner.
+  const visit = midFirst(seg.length).map(i => seg[i]);
+
   const f = function (x, y, z) {
     let best = Infinity;
-    for (let i = 0; i < seg.length; i++) {
-      const S = seg[i];
+    for (let i = 0; i < visit.length; i++) {
+      const S = visit[i];
       const px = x - S.ax, py = y - S.ay, pz = z - S.az;
       // where along this segment, and how far past its ends
       const proj = px * S.tx + py * S.ty + pz * S.tz;
-      const t = proj < 0 ? 0 : proj > S.L ? 1 : proj / S.L;
+      const q = Math.min(Math.max(proj, 0), S.L);
+      // Everything this segment can contribute lies within `cull` of its axis,
+      // so a point further off the axis than that cannot beat what `best`
+      // already holds -- allowing for the taper, which divides the answer down
+      // and so has to be allowed for here, exactly as the joint's own reach
+      // test below allows for it. The term dropped is a term that would have
+      // lost; see the head of the file for why that is all this is.
+      if (Math.hypot(px - S.tx * q, py - S.ty * q, pz - S.tz * q) - S.cull
+          >= best * S.taper) continue;
+      const t = q / S.L;
       // outside this segment's own span, and which end that is
       // a miter runs each segment on past its joint; a round join does not
       const oStart = -(proj + S.e0), oEnd = proj - (S.L + S.e1);
@@ -529,7 +604,12 @@ function along(path, profile, opts) {
     }
   const reach = R * sMax;
   f.bounds = { lo: lo.map(c => c - reach), hi: hi.map(c => c + reach) };
-  f.seg = seg;
+  // In the order they are evaluated, which is the order `pack` lays them out
+  // in and the order the kernel's primitive reads them back: the two halves
+  // walk the same array, so they cull the same segments in the same sequence
+  // and their answers agree to the bit. `f.frames` below stays in path order,
+  // because a frame is about where it sits on the path.
+  f.seg = visit;
   f.arcLength = total;
   f.segments = seg.length;
   f.radius = R;
@@ -623,7 +703,12 @@ const pad = (p) => (p.length > 2 ? p : [p[0], p[1], 0]);
 // Sketch.prototype.section hands back both halves already paired up. Only
 // along() calls it; the slot is what crosses into a shader.
 const SECTION_KINDS = { circle: 0, rect: 1, halfCircle: 2, polygon: 3 };
-const STRIDE = 31;
+// The item layout, in the order the primitive reads it: the five the cull test
+// needs first -- origin, tangent, span and scales, roll/taper/reach, cull
+// radius -- then the rest, which a culled segment never reads. The same order
+// is written down in build-twins.mjs's intrinsic table and comes out of the
+// unroller as the ITEM macro's parameters.
+const STRIDE = 32;
 
 function pack(path, section, opts) {
   const kind = SECTION_KINDS[section && section.kind];
@@ -646,16 +731,17 @@ function pack(path, section, opts) {
     const o = i * STRIDE;
     segs[o] = g.ax; segs[o + 1] = g.ay; segs[o + 2] = g.az;
     segs[o + 3] = g.tx; segs[o + 4] = g.ty; segs[o + 5] = g.tz;
-    segs[o + 6] = g.ux; segs[o + 7] = g.uy; segs[o + 8] = g.uz;
-    segs[o + 9] = g.vx; segs[o + 10] = g.vy; segs[o + 11] = g.vz;
-    segs[o + 12] = g.k1u; segs[o + 13] = g.k1v;
-    segs[o + 14] = g.turnC; segs[o + 15] = g.turnS;
-    segs[o + 16] = g.L; segs[o + 17] = g.sA; segs[o + 18] = g.sB;
-    segs[o + 19] = g.e0; segs[o + 20] = g.e1;
-    segs[o + 21] = g.dw; segs[o + 22] = g.taper; segs[o + 23] = g.reach1;
-    segs[o + 24] = g.capA ? 1 : 0; segs[o + 25] = g.capB ? 1 : 0;
-    segs[o + 26] = g.round1 ? 1 : 0;
-    segs[o + 27] = kind; segs[o + 28] = a; segs[o + 29] = b; segs[o + 30] = c;
+    segs[o + 6] = g.L; segs[o + 7] = g.sA; segs[o + 8] = g.sB;
+    segs[o + 9] = g.dw; segs[o + 10] = g.taper; segs[o + 11] = g.reach1;
+    segs[o + 12] = g.cull;
+    segs[o + 13] = g.ux; segs[o + 14] = g.uy; segs[o + 15] = g.uz;
+    segs[o + 16] = g.vx; segs[o + 17] = g.vy; segs[o + 18] = g.vz;
+    segs[o + 19] = g.k1u; segs[o + 20] = g.k1v;
+    segs[o + 21] = g.turnC; segs[o + 22] = g.turnS;
+    segs[o + 23] = g.e0; segs[o + 24] = g.e1;
+    segs[o + 25] = g.capA ? 1 : 0; segs[o + 26] = g.capB ? 1 : 0;
+    segs[o + 27] = g.round1 ? 1 : 0;
+    segs[o + 28] = kind; segs[o + 29] = a; segs[o + 30] = b; segs[o + 31] = c;
   });
   const h = [0, 1, 2].map(k => Math.max(Math.abs(f.bounds.lo[k]), Math.abs(f.bounds.hi[k])));
   return {

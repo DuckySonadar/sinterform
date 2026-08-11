@@ -263,9 +263,14 @@ const SCENES = {
     const S = new SinterSketch3D.Sketch3D();
     const curve = S.nurbs([S.point(-20, -9, 0), S.point(-5, 11, 6),
                            S.point(11, -6, 13), S.point(20, 9, 21)]);
-    // Every fourth sample: a sweep costs O(segments) *per raymarch step*, so a
-    // finely sampled path is far more expensive to draw than to mesh. A dozen
-    // segments still shows the taper, the roll and the corner fill.
+    // Every fourth sample, and the reason is the shader rather than the
+    // arithmetic. The kernel culls segments it can prove will lose, so meshing
+    // a path four times finer costs little more -- but a slotted primitive is
+    // *unrolled* into the shader source, one copy of the body per segment, and
+    // that is paid whether the segment is culled or not. Measured on the
+    // software rasteriser this repository's checks run against, the full path
+    // takes four times as long to compile and to draw. A dozen segments still
+    // shows the taper, the roll and the corner fill.
     const fine = S.sample(curve, 0.4);
     const path = fine.filter((_, i) => i % 4 === 0 || i === fine.length - 1);
     const { sweep, node } = SinterSweep.pack(path, { kind: 'rect', a: 7, b: 3, c: 0.8 },

@@ -60,20 +60,22 @@ const SCENES = ['every primitive', 'booleans', 'two bodies, no blend across',
                 // a real solved profile rather than a test polygon.
                 'sketch 2D, extruded', 'sketch 3D, extruded',
                 // one node, N round cones, blended into a block
-                'wire, tapered and blended'];
-// The two sweep scenes are deliberately not in that list, and cannot be: a
-// slotted primitive costs O(items) per sample and a sweep's item is the
-// heaviest of them, so under a software rasteriser one frame outlasts the
-// screenshot's own timeout -- the page stops answering long before it draws.
-// It is not that they are slow to check, it is that they cannot be checked
-// here at all.
-//
-// They are checked, elsewhere and harder. check-glsl compiles the same
-// assembled block slotBlock hands the viewer -- profiles, the section
-// dispatcher, then the sweep -- and compares it against the JS twin per point;
-// check-sweep holds that twin bit-for-bit against the closure the segments
-// were packed from. Between them that is the shader source, its compile and
-// its geometry, which is more than a silhouette says.
+                'wire, tapered and blended',
+                // The two heaviest, and the last to arrive: a sweep's item is
+                // the largest of any slotted primitive, and these used to
+                // outlast the screenshot's own timeout on the software
+                // rasteriser this runs on -- 39 seconds for one frame, which
+                // is not a slow check, it is no check at all. Culling the
+                // segments brought that to about five, so the silhouettes are
+                // comparable here now like every other scene's.
+                //
+                // Worth having even though check-glsl compares the same
+                // assembled block per point and check-sweep holds the twin
+                // bit-for-bit against the closure: those two say the field is
+                // right, and this says the picture is -- bounds, the packing
+                // of a node the viewer built itself, and a shader that still
+                // compiles with a sweep and a section dispatcher in it.
+                'sweep, tapered and twisted', 'sweep, a drawn section'];
 const RES = 0.9;
 
 const browser = await chromium.launch({

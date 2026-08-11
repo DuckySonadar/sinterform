@@ -991,6 +991,150 @@ console.log('\n--- along a 3D sketch ---');
 }
 
 // ======================================================================
+console.log('\n--- the cull is a shortcut, not a decision ---');
+{
+  // The union is over every segment -- that is what makes a self-crossing path
+  // an ordinary case -- but the evaluator does not evaluate every segment. It
+  // skips the ones it can prove will lose: everything a segment can contribute
+  // lies within `cull` of its axis, so a point further off that axis than
+  // `cull` plus what `best` already holds cannot be beaten by it.
+  //
+  // If that radius were ever too small the sweep would quietly lose material,
+  // and nothing else here would notice: the GLSL culls the same way and the JS
+  // twin is generated from it, so both halves would be wrong together and
+  // agree beautifully about it.
+  //
+  // So this compares against the union with no shortcut at all -- the same
+  // evaluator, with every cull radius set past the size of the scene. The bar
+  // is bit-for-bit, because a skipped term is one that would have lost, and a
+  // term that loses changes nothing.
+  const bend = [], coil = [], eight = [], ring = [];
+  for (let i = 0; i <= 40; i++) {
+    const t = i / 40 * Math.PI * 1.6;
+    bend.push([26 * Math.cos(t), 26 * Math.sin(t), 7 * Math.sin(2.3 * t)]);
+  }
+  for (let i = 0; i <= 60; i++) {
+    const t = i / 60 * 4 * Math.PI;
+    coil.push([16 * Math.cos(t), 16 * Math.sin(t), -14 + 28 * i / 60]);
+  }
+  // a lemniscate: the path crosses itself, so the covering segment is often
+  // not the nearest one, which is exactly where a cull that was too eager
+  // would take a bite out of the surface
+  for (let i = 0; i <= 48; i++) {
+    const t = i / 48 * 2 * Math.PI, k = 1 + Math.sin(t) * Math.sin(t);
+    eight.push([26 * Math.cos(t) / k, 26 * Math.sin(t) * Math.cos(t) / k, 0]);
+  }
+  for (let i = 0; i < 36; i++) {
+    const t = i / 36 * 2 * Math.PI;
+    ring.push([22 * Math.cos(t), 22 * Math.sin(t), 5 * Math.sin(2 * t)]);
+  }
+
+  const cases = [
+    ['a bend in space', bend, P.rect(9, 4, 1), {}],
+    ['a coil', coil, P.circle(3), {}],
+    ['a one-sided section on a self-crossing path', eight, P.halfCircle(4), {}],
+    ['taper and twist', bend, P.rect(8, 3), { scale: (t) => 1 + t, twist: 2 }],
+    ['a miter join', bend, P.rect(7, 3), { join: 'miter' }],
+    ['a closed loop', ring, P.circle(3.5), { closed: true }]
+  ];
+
+  // The segments are live objects and the evaluator reads `cull` off them per
+  // sample, so a test can turn the shortcut off without a second evaluator to
+  // keep in step -- which is the whole point: the thing being compared has to
+  // be the same code.
+  const withCull = (f, r, fn) => {
+    const keep = f.seg.map(S => S.cull);
+    f.seg.forEach(S => { S.cull = typeof r === 'number' ? r : S.cull * r(S); });
+    try { return fn(); } finally { f.seg.forEach((S, i) => { S.cull = keep[i]; }); }
+  };
+
+  let sd = 0x1234567;
+  const q = () => { sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; };
+  const points = (f, n) => {
+    const b = f.bounds, out = [];
+    for (let i = 0; i < n; i++)
+      out.push([0, 1, 2].map(k => b.lo[k] - 4 + (b.hi[k] - b.lo[k] + 8) * q()));
+    return out;
+  };
+
+  let worst = 0, differs = 0, shuffled = 0, evaluated = 0, total = 0;
+  for (const [what, path, profile, opts] of cases) {
+    const f = SW.along(path, profile, opts);
+    const pts = points(f, 8000);
+    const truth = withCull(f, 1e9, () => pts.map(p => f(...p)));
+    pts.forEach((p, i) => {
+      const d = f(...p);
+      if (d !== truth[i]) { differs++; worst = Math.max(worst, Math.abs(d - truth[i])); }
+    });
+    // and the answer cannot depend on the order the terms are taken in, which
+    // it would if a term were being dropped that had something to say
+    const order = f.seg.slice();
+    for (let i = f.seg.length - 1; i > 0; i--) {
+      const j = Math.floor(q() * (i + 1));
+      [f.seg[i], f.seg[j]] = [f.seg[j], f.seg[i]];
+    }
+    pts.forEach((p, i) => { if (f(...p) !== truth[i]) shuffled++; });
+    order.forEach((S, i) => { f.seg[i] = S; });
+    evaluated += f.segments;
+    total++;
+  }
+  ok(differs === 0, `the culled union is the whole union, over ${cases.length} `
+    + `paths of ${Math.round(evaluated / total)} segments on average, at 8,000 points each`
+    + (differs ? ` — ${differs} differ, worst ${worst.toExponential(2)} mm` : ''));
+  ok(shuffled === 0, 'and it does not matter what order the segments are taken in');
+
+  // Teeth. A cull radius that is too small does not fail loudly: it drops a
+  // term that would have won, so the field reports the surface further away
+  // than it is -- material missing, in the one direction a raymarcher steps
+  // straight through. Quartering it here shows both that the comparison above
+  // can see such a thing at all, and which way the error goes.
+  {
+    const f = SW.along(bend, P.rect(9, 4, 1), {});
+    const pts = points(f, 8000);
+    const truth = withCull(f, 1e9, () => pts.map(p => f(...p)));
+    let over = 0, under = 0;
+    withCull(f, () => 0.25, () => pts.forEach((p, i) => {
+      const d = f(...p);
+      if (d > truth[i]) over++; else if (d < truth[i]) under++;
+    }));
+    ok(over > 100, `a cull radius a quarter of the true one loses material `
+      + `(${over}/8,000 samples report further away than the truth)`);
+    ok(under === 0, 'and never the other way, which is what makes the test one-sided');
+  }
+
+  // The kernel's half culls off the same number, packed at index 12 of each
+  // item, so the same comparison is available there -- and it has to be made
+  // there too, because a packing that wrote the wrong column would be a sweep
+  // whose two halves disagree in a way only a raymarcher would find.
+  {
+    const tee = [[[-6, -3], [6, -3], [6, 1], [2, 1], [2, 7], [-2, 7], [-2, 1], [-6, 1]]];
+    SF.profiles = [{ name: 'tee', loops: tee }];
+    const teeFn = (u, v) => SF.polygonSDF(tee, u, v);
+    teeFn.radius = Math.hypot(6, 7);
+    let bad = 0, n = 0;
+    for (const [what, path, sect, opts] of [
+      ['rect', bend, { kind: 'rect', a: 9, b: 4, c: 1 }, { twist: 1.5 }],
+      ['drawn', bend, { kind: 'polygon', a: 0, fn: teeFn }, { scale: (t) => 1 + t }]
+    ]) {
+      const { sweep, node, f } = SW.pack(path, sect, opts);
+      const plan = [{ id: 0, nodes: [node] }];
+      const wide = { name: sweep.name, segs: Float64Array.from(sweep.segs),
+                     kind: sweep.kind, sect: sweep.sect };
+      for (let i = 12; i < wide.segs.length; i += SW.STRIDE) wide.segs[i] = 1e9;
+      for (const p of points(f, 8000)) {
+        SF.sweeps = [sweep];
+        const culled = SF.sceneSDF(plan, ...p);
+        SF.sweeps = [wide];
+        if (culled !== SF.sceneSDF(plan, ...p)) bad++;
+        n++;
+      }
+    }
+    ok(bad === 0, `and the primitive's own cull drops nothing either `
+      + `(${n.toLocaleString()} points)` + (bad ? ` — ${bad} differ` : ''));
+  }
+}
+
+// ======================================================================
 console.log('\n--- and as a kernel primitive ---');
 {
   // `pack()` hands the same sweep to the kernel as packed segments, so it can

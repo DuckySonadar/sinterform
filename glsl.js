@@ -267,6 +267,12 @@ float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
   // circular section cannot show the difference, anything else bunches at the
   // corner. And it is a term of its own rather than something the segment
   // answers past its end, gated on reach and clamped into the turn.
+  //
+  // The item is laid out in the order this reads it, which is not the order it
+  // was worked out in: the five values the cull test needs come first, so a
+  // segment that cannot win is answered without reading the other nineteen.
+  // build-twins.mjs's intrinsic table and sweep.js's `pack` say that same
+  // layout, and check-glsl runs both ends of it on the same data.
   sweep: { fn: 'pSweep', slotted: true, spec: true,
     src: `float sweepSection(float kind, vec3 sp, float u, float v){
   if (kind < 0.5) return length(vec2(u, v)) - sp.x;
@@ -285,68 +291,89 @@ float pSweep(sweeppath w, vec3 p, vec3 d, float r){
   float best = 1e18;
   int n = swCount(w);
   for (int i = 0; i < n; i++) {
+    // Only what the cull test needs is read here. A segment that cannot win
+    // costs one dot, one length and a compare, and never touches the other
+    // nineteen numbers of its item -- which is most of the item, and on the JS
+    // side most of the memory traffic.
     vec3 A = swA(w, i);
     vec3 T = swT(w, i);
-    vec3 U = swU(w, i);
-    vec3 V = swV(w, i);
-    vec2 K = swK(w, i);
-    vec2 TC = swTurn(w, i);
     vec3 LS = swLS(w, i);
-    vec2 E = swE(w, i);
     vec3 M = swMisc(w, i);
-    vec3 C = swCaps(w, i);
-    float kind = swKind(w, i);
-    vec3 sp = swSect(w, i);
+    float cull = swCull(w, i);
 
     vec3 pa = p - A;
     float proj = dot(pa, T);
-    float t = proj < 0.0 ? 0.0 : (proj > LS.x ? 1.0 : proj/LS.x);
-    float oStart = -(proj + E.x);
-    float oEnd = proj - (LS.x + E.y);
-    bool atA = oStart > oEnd;
-    float past = atA ? oStart : oEnd;
-    float capped = max(C.x > 0.5 ? oStart : -1e30, C.y > 0.5 ? oEnd : -1e30);
-    float s = LS.y + (LS.z - LS.y)*t;
-    float u0 = dot(pa, U);
-    float v0 = dot(pa, V);
-    float u = u0;
-    float v = v0;
-    if (M.x != 0.0) {
-      float a = M.x*t;
-      float ca = cos(a);
-      float sa = sin(a);
-      u = u0*ca + v0*sa;
-      v = v0*ca - u0*sa;
-    }
-    float d2 = s > 1e-9 ? sweepSection(kind, sp, u/s, v/s)*s : length(vec2(u, v));
-    float raw;
-    if (past > 0.0) raw = d2 <= 0.0 ? past : length(vec2(d2, past));
-    else raw = max(d2, capped);
-    best = min(best, raw/M.y);
+    float q = clamp(proj, 0.0, LS.x);
+    // Everything this segment can contribute -- the prism, its caps, a miter's
+    // run-on and the fill at its joint -- lies within cull of the axis, so a
+    // point further than that from the axis cannot beat what is already in
+    // best. The taper divides the answer down, so it has to be allowed for
+    // here, exactly as the joint's own reach test allows for it.
+    //
+    // This is what makes a sweep affordable. The union is over every segment
+    // by definition -- that is what stops a self-crossing path from taking
+    // bites out of itself -- but a point near one end of the path is nowhere
+    // near the far end, and answering for the far end costs a hundred flops to
+    // return a number that loses. The test drops only terms that provably
+    // lose, so a culled sweep is bit-for-bit the sweep it would have been.
+    if (length(pa - T*q) - cull < best*M.y) {
+      vec3 U = swU(w, i);
+      vec3 V = swV(w, i);
+      vec2 K = swK(w, i);
+      vec2 TC = swTurn(w, i);
+      vec2 E = swE(w, i);
+      vec3 C = swCaps(w, i);
+      float kind = swKind(w, i);
+      vec3 sp = swSect(w, i);
 
-    if (C.z > 0.5) {
-      float oJ = proj - LS.x;
-      if (length(vec3(u0, v0, oJ)) - M.z < best*M.y) {
-        float uj = u0;
-        float vj = v0;
-        if (M.x != 0.0) {
-          float ca = cos(M.x);
-          float sa = sin(M.x);
-          uj = u0*ca + v0*sa;
-          vj = v0*ca - u0*sa;
+      float t = q/LS.x;
+      float oStart = -(proj + E.x);
+      float oEnd = proj - (LS.x + E.y);
+      bool atA = oStart > oEnd;
+      float past = atA ? oStart : oEnd;
+      float capped = max(C.x > 0.5 ? oStart : -1e30, C.y > 0.5 ? oEnd : -1e30);
+      float s = LS.y + (LS.z - LS.y)*t;
+      float u0 = dot(pa, U);
+      float v0 = dot(pa, V);
+      float u = u0;
+      float v = v0;
+      if (M.x != 0.0) {
+        float a = M.x*t;
+        float ca = cos(a);
+        float sa = sin(a);
+        u = u0*ca + v0*sa;
+        v = v0*ca - u0*sa;
+      }
+      float d2 = s > 1e-9 ? sweepSection(kind, sp, u/s, v/s)*s : length(vec2(u, v));
+      float raw;
+      if (past > 0.0) raw = d2 <= 0.0 ? past : length(vec2(d2, past));
+      else raw = max(d2, capped);
+      best = min(best, raw/M.y);
+
+      if (C.z > 0.5) {
+        float oJ = proj - LS.x;
+        if (length(vec3(u0, v0, oJ)) - M.z < best*M.y) {
+          float uj = u0;
+          float vj = v0;
+          if (M.x != 0.0) {
+            float ca = cos(M.x);
+            float sa = sin(M.x);
+            uj = u0*ca + v0*sa;
+            vj = v0*ca - u0*sa;
+          }
+          float sJ = LS.z;
+          float pk = uj*K.x + vj*K.y;
+          float pm = vj*K.x - uj*K.y;
+          float beta;
+          float off;
+          if (oJ < 0.0) { beta = pm; off = oJ; }
+          else if (pm*TC.y - oJ*TC.x >= 0.0) { beta = length(vec2(pm, oJ)); off = 0.0; }
+          else { beta = pm*TC.x + oJ*TC.y; off = oJ*TC.x - pm*TC.y; }
+          float p2 = sweepSection(kind, sp, (pk*K.x - beta*K.y)/sJ,
+                                            (pk*K.y + beta*K.x)/sJ)*sJ;
+          float c = (off == 0.0 ? p2 : length(vec2(max(p2, 0.0), abs(off))))/M.y;
+          best = min(best, c);
         }
-        float sJ = LS.z;
-        float pk = uj*K.x + vj*K.y;
-        float pm = vj*K.x - uj*K.y;
-        float beta;
-        float off;
-        if (oJ < 0.0) { beta = pm; off = oJ; }
-        else if (pm*TC.y - oJ*TC.x >= 0.0) { beta = length(vec2(pm, oJ)); off = 0.0; }
-        else { beta = pm*TC.x + oJ*TC.y; off = oJ*TC.x - pm*TC.y; }
-        float p2 = sweepSection(kind, sp, (pk*K.x - beta*K.y)/sJ,
-                                          (pk*K.y + beta*K.x)/sJ)*sJ;
-        float c = (off == 0.0 ? p2 : length(vec2(max(p2, 0.0), abs(off))))/M.y;
-        best = min(best, c);
       }
     }
   }
@@ -533,10 +560,10 @@ const UNROLL = {
     post: "  return best;"
   },
   sweep: {
-    fn: "pSweep", stride: 31, arity: [3, 3, 3, 3, 2, 2, 3, 2, 3, 3, 1, 3],
+    fn: "pSweep", stride: 32, arity: [3, 3, 3, 3, 1, 3, 3, 2, 2, 2, 3, 1, 3],
     helpers: "float sweepSection(float kind, vec3 sp, float u, float v){\n  if ((kind < 0.5)) {\n    return (length(vec2(u, v)) - sp.x);\n  }\n  if ((kind < 1.5)) {\n    float hw = max(((sp.x * 0.5) - sp.z), 0.0);\n    float hh = max(((sp.y * 0.5) - sp.z), 0.0);\n    float qu = (abs(u) - hw);\n    float qv = (abs(v) - hh);\n    return ((length(max(vec2(qu, qv), 0.0)) + min(max(qu, qv), 0.0)) - sp.z);\n  }\n  if ((kind < 2.5)) {\n    return max((length(vec2(u, v)) - sp.x), (-v));\n  }\n  return sectionPoly(sp.x, u, v);\n}\n",
     pre: "  float best = 1e18;",
-    macro: "#define ITEM(SWA, SWT, SWU, SWV, SWK, SWTURN, SWLS, SWE, SWMISC, SWCAPS, SWKIND, SWSECT) {\\\n  vec3 A = SWA; \\\n  vec3 T = SWT; \\\n  vec3 U = SWU; \\\n  vec3 V = SWV; \\\n  vec2 K = SWK; \\\n  vec2 TC = SWTURN; \\\n  vec3 LS = SWLS; \\\n  vec2 E = SWE; \\\n  vec3 M = SWMISC; \\\n  vec3 C = SWCAPS; \\\n  float kind = SWKIND; \\\n  vec3 sp = SWSECT; \\\n  vec3 pa = (p - A); \\\n  float proj = dot(pa, T); \\\n  float t = ((proj < 0.0) ? 0.0 : ((proj > LS.x) ? 1.0 : (proj / LS.x))); \\\n  float oStart = (-(proj + E.x)); \\\n  float oEnd = (proj - (LS.x + E.y)); \\\n  bool atA = (oStart > oEnd); \\\n  float past = (atA ? oStart : oEnd); \\\n  float capped = max(((C.x > 0.5) ? oStart : (-1e30)), ((C.y > 0.5) ? oEnd : (-1e30))); \\\n  float s = (LS.y + ((LS.z - LS.y) * t)); \\\n  float u0 = dot(pa, U); \\\n  float v0 = dot(pa, V); \\\n  float u = u0; \\\n  float v = v0; \\\n  if ((M.x != 0.0)) { \\\n    float a = (M.x * t); \\\n    float ca = cos(a); \\\n    float sa = sin(a); \\\n    u = ((u0 * ca) + (v0 * sa)); \\\n    v = ((v0 * ca) - (u0 * sa)); \\\n  } \\\n  float d2 = ((s > 1e-9) ? (sweepSection(kind, sp, (u / s), (v / s)) * s) : length(vec2(u, v))); \\\n  float raw; \\\n  if ((past > 0.0)) { \\\n    raw = ((d2 <= 0.0) ? past : length(vec2(d2, past))); \\\n  } else { \\\n    raw = max(d2, capped); \\\n  } \\\n  best = min(best, (raw / M.y)); \\\n  if ((C.z > 0.5)) { \\\n    float oJ = (proj - LS.x); \\\n    if (((length(vec3(u0, v0, oJ)) - M.z) < (best * M.y))) { \\\n      float uj = u0; \\\n      float vj = v0; \\\n      if ((M.x != 0.0)) { \\\n        float ca = cos(M.x); \\\n        float sa = sin(M.x); \\\n        uj = ((u0 * ca) + (v0 * sa)); \\\n        vj = ((v0 * ca) - (u0 * sa)); \\\n      } \\\n      float sJ = LS.z; \\\n      float pk = ((uj * K.x) + (vj * K.y)); \\\n      float pm = ((vj * K.x) - (uj * K.y)); \\\n      float beta; \\\n      float off; \\\n      if ((oJ < 0.0)) { \\\n        beta = pm; \\\n        off = oJ; \\\n      } else { \\\n        if ((((pm * TC.y) - (oJ * TC.x)) >= 0.0)) { \\\n          beta = length(vec2(pm, oJ)); \\\n          off = 0.0; \\\n        } else { \\\n          beta = ((pm * TC.x) + (oJ * TC.y)); \\\n          off = ((oJ * TC.x) - (pm * TC.y)); \\\n        } \\\n      } \\\n      float p2 = (sweepSection(kind, sp, (((pk * K.x) - (beta * K.y)) / sJ), (((pk * K.y) + (beta * K.x)) / sJ)) * sJ); \\\n      float c = (((off == 0.0) ? p2 : length(vec2(max(p2, 0.0), abs(off)))) / M.y); \\\n      best = min(best, c); \\\n    } \\\n  } }\n",
+    macro: "#define ITEM(SWA, SWT, SWLS, SWMISC, SWCULL, SWU, SWV, SWK, SWTURN, SWE, SWCAPS, SWKIND, SWSECT) {\\\n  vec3 A = SWA; \\\n  vec3 T = SWT; \\\n  vec3 LS = SWLS; \\\n  vec3 M = SWMISC; \\\n  float cull = SWCULL; \\\n  vec3 pa = (p - A); \\\n  float proj = dot(pa, T); \\\n  float q = clamp(proj, 0.0, LS.x); \\\n  if (((length((pa - (T * q))) - cull) < (best * M.y))) { \\\n    vec3 U = SWU; \\\n    vec3 V = SWV; \\\n    vec2 K = SWK; \\\n    vec2 TC = SWTURN; \\\n    vec2 E = SWE; \\\n    vec3 C = SWCAPS; \\\n    float kind = SWKIND; \\\n    vec3 sp = SWSECT; \\\n    float t = (q / LS.x); \\\n    float oStart = (-(proj + E.x)); \\\n    float oEnd = (proj - (LS.x + E.y)); \\\n    bool atA = (oStart > oEnd); \\\n    float past = (atA ? oStart : oEnd); \\\n    float capped = max(((C.x > 0.5) ? oStart : (-1e30)), ((C.y > 0.5) ? oEnd : (-1e30))); \\\n    float s = (LS.y + ((LS.z - LS.y) * t)); \\\n    float u0 = dot(pa, U); \\\n    float v0 = dot(pa, V); \\\n    float u = u0; \\\n    float v = v0; \\\n    if ((M.x != 0.0)) { \\\n      float a = (M.x * t); \\\n      float ca = cos(a); \\\n      float sa = sin(a); \\\n      u = ((u0 * ca) + (v0 * sa)); \\\n      v = ((v0 * ca) - (u0 * sa)); \\\n    } \\\n    float d2 = ((s > 1e-9) ? (sweepSection(kind, sp, (u / s), (v / s)) * s) : length(vec2(u, v))); \\\n    float raw; \\\n    if ((past > 0.0)) { \\\n      raw = ((d2 <= 0.0) ? past : length(vec2(d2, past))); \\\n    } else { \\\n      raw = max(d2, capped); \\\n    } \\\n    best = min(best, (raw / M.y)); \\\n    if ((C.z > 0.5)) { \\\n      float oJ = (proj - LS.x); \\\n      if (((length(vec3(u0, v0, oJ)) - M.z) < (best * M.y))) { \\\n        float uj = u0; \\\n        float vj = v0; \\\n        if ((M.x != 0.0)) { \\\n          float ca = cos(M.x); \\\n          float sa = sin(M.x); \\\n          uj = ((u0 * ca) + (v0 * sa)); \\\n          vj = ((v0 * ca) - (u0 * sa)); \\\n        } \\\n        float sJ = LS.z; \\\n        float pk = ((uj * K.x) + (vj * K.y)); \\\n        float pm = ((vj * K.x) - (uj * K.y)); \\\n        float beta; \\\n        float off; \\\n        if ((oJ < 0.0)) { \\\n          beta = pm; \\\n          off = oJ; \\\n        } else { \\\n          if ((((pm * TC.y) - (oJ * TC.x)) >= 0.0)) { \\\n            beta = length(vec2(pm, oJ)); \\\n            off = 0.0; \\\n          } else { \\\n            beta = ((pm * TC.x) + (oJ * TC.y)); \\\n            off = ((oJ * TC.x) - (pm * TC.y)); \\\n          } \\\n        } \\\n        float p2 = (sweepSection(kind, sp, (((pk * K.x) - (beta * K.y)) / sJ), (((pk * K.y) + (beta * K.x)) / sJ)) * sJ); \\\n        float c = (((off == 0.0) ? p2 : length(vec2(max(p2, 0.0), abs(off)))) / M.y); \\\n        best = min(best, c); \\\n      } \\\n    } \\\n  } }\n",
     post: "  return best;"
   },
   profile: {

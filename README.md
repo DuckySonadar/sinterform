@@ -325,6 +325,12 @@ translated.
 | `fieldSample(s, u, v, w)` | `sampleFieldUVW` — trilinear read of a `fields` grid |
 | `edgeCount(o)`, `edgeA(o, i)`, `edgeB(o, i)` | the flattened edges of a `profiles` outline |
 
+The handle a twin holds is the *resolved* data — the outline's edges, the
+wire's segments, the sweep's packed segments, with an empty slot already
+turned into the primitive's default — looked up once when the primitive is
+entered. That is what the shader holds too, since its items are compiled into
+the function before it runs.
+
 That is the whole seam, and it is two data reads wide. An undeclared intrinsic
 is an error, so it cannot widen by accident. Everything around them — the box
 union, the slab, the crossing count, the nearest-edge search — is ordinary GLSL
@@ -443,8 +449,10 @@ one of the three the shape actually reads.
 
 A section dragged along a path, at a scale and a roll that may both vary. The
 largest of the slotted primitives, and the only one whose items are not raw
-geometry: each is a path segment carrying the frame, span, scale, roll, caps and
-turn that `sweep.js` worked out for it.
+geometry: each is a path segment carrying the frame, span, scale, roll, caps,
+turn and cull radius that `sweep.js` worked out for it. The item is laid out in
+the order the primitive reads it — the five values the cull test needs first,
+so a segment that cannot win is answered without reading the rest.
 
 ```js
 const { sweep, node } = SinterSweep.pack(path, { kind: 'rect', a: 9, b: 4, c: 1 },
@@ -796,8 +804,50 @@ path with a one-sided profile it loses material in 9,504 of 200,000 samples,
 gains it past the ends it cannot cap, and is not 1-Lipschitz, so a marcher
 can step through it.
 
-The price of the union is O(path segments) per sample instead of O(1).
-Affordable for a mesher; the thing to watch for a raymarcher.
+The price of the union is that every segment is a term of it. The price of
+*evaluating* it is smaller, because most of those terms can be dismissed
+without being computed: everything a segment can contribute — its prism, its
+caps, a miter's run-on, the fill at its joint — lies within a radius of that
+segment's own axis, which `along` works out when it builds the segment. A
+point further off the axis than that radius plus the running minimum cannot be
+beaten by it, so the answer is one subtraction and a square root.
+
+Nothing is approximated. What the cull drops is a term that would have lost,
+so the field is the same field to the last bit, and `check-sweep` says so by
+running the same evaluator with the shortcut turned off.
+
+What is left is the order the terms are taken in, which decides how quickly
+the running minimum gets tight enough to cull against. Path order is the worst
+one: a point beside the middle of the path is far from the first segment, so
+nothing is skipped until the near segments arrive. So the segments are visited
+**middle first**, then the quarters, then the eighths — which is also the
+order they are packed in, so both halves of the kernel walk the same array.
+
+Measured on the viewer's own sweep, sampled fully at 48 segments: 11 segments
+evaluated per sample, against 28 in path order and 9.5 for an oracle that
+starts out knowing the answer. What that is worth grows with the path, because
+what it removes is the part of the cost that had nothing to do with the point
+being asked about:
+
+| path | µs per sample, before | after |
+| --- | --- | --- |
+| 6 segments | 2.8 | 1.0 |
+| 12 segments | 6.2 | 1.8 |
+| 48 segments | 22.2 | 5.2 |
+| a 150-segment coil | 62.2 | 9.5 |
+
+Meshing follows it: that coil went from 36 seconds to 5.
+
+Two changes are in those numbers. The cull is the larger one on a long path;
+the other is that the JS twin now takes hold of the segment array once when
+the primitive is entered rather than on each of the thirty-two reads an item
+costs — the same correction the wire and the profile got, since all three
+reach their items through the same seam.
+
+Affordable for a mesher, then, and still the thing to watch for a raymarcher —
+but for a different reason now. A slotted primitive is *unrolled* into the
+shader, one copy of the body per segment, and that source is paid for whether
+the segment is culled or not.
 
 ### What is exact
 
@@ -865,7 +915,7 @@ to no material lost or invented, and no more than 0.05 mm reported past the
 truth on the outside.
 
 ```
-node check-sweep.mjs      # 110 assertions
+node check-sweep.mjs      # 115 assertions
 ```
 
 ## Inlining it into HTML
@@ -927,17 +977,19 @@ to half a cell inside the true one and its edges are faceted, so the outlines
 are close rather than identical.
 
 It also catches the ordinary breakages: a shader that stopped compiling, a
-module that stopped attaching to its global. And it builds *every* scene's plan,
-including the two it cannot draw — a scene is a page of kernel API used the way
-a caller would use it, so building one is worth checking even when nothing is
-rendered.
+module that stopped attaching to its global. And it builds *every* scene's plan
+— a scene is a page of kernel API used the way a caller would use it, so
+building one is worth checking even when nothing is rendered.
 
-The two sweep scenes are the ones it cannot draw. A slotted primitive costs
-O(items) per sample and a sweep's item is the heaviest of them, so under the
-software rasteriser CI has, one frame outlasts any timeout worth setting. Their
-geometry is checked harder elsewhere: `check-glsl` compiles the same assembled
-block the viewer gets and compares it to the JS twin per point, and `check-sweep`
-holds that twin bit-for-bit against the closure the segments were packed from.
+The two sweep scenes are in it now, and until the segments were culled they
+could not be: under the software rasteriser CI has, one frame of the tapered
+sweep took 39 seconds, which is not a slow check but no check at all. It takes
+about five now. Their geometry is still checked harder elsewhere — `check-glsl`
+compiles the same assembled block the viewer gets and compares it to the JS
+twin per point, and `check-sweep` holds that twin bit-for-bit against the
+closure the segments were packed from — but a silhouette says things a sampled
+comparison does not: whether the bounds hold the shape, and whether a shader
+with a sweep and a section dispatcher in it still compiles.
 
 ### `check-glsl.mjs` — do the GLSL and JS twins agree?
 

@@ -925,10 +925,13 @@ console.log('\n--- and the whole way through to a solid ---');
   // 3D distance there *is* the 2D distance the sketch reports -- read in the
   // segment's own frame rather than a guessed one, so this checks the outline
   // arrived and not which way U happened to point.
-  const g = sec.section.fn, sg = packed.sweep.segs;
-  const sA = [sg[0], sg[1], sg[2]], sT = [sg[3], sg[4], sg[5]];
-  const sU = [sg[6], sg[7], sg[8]], sV = [sg[9], sg[10], sg[11]];
-  const half = sg[16] / 2;
+  // The frame comes off the segment by name rather than by index into the
+  // packed array: what order sweep.js lays an item out in is its business, and
+  // a test that spells the offsets is a copy of that layout waiting to rot.
+  const g = sec.section.fn, sg = packed.f.seg[0];
+  const sA = [sg.ax, sg.ay, sg.az], sT = [sg.tx, sg.ty, sg.tz];
+  const sU = [sg.ux, sg.uy, sg.uz], sV = [sg.vx, sg.vy, sg.vz];
+  const half = sg.L / 2;
   let secWorst = 0, tried = 0;
   for (let i = 0; i < 20000; i++) {
     const u = -40 + 80 * rnd(), v = -30 + 60 * rnd();
