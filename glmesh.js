@@ -147,7 +147,8 @@ function sampler(opts) {
 
     const { src, at } = GL.mapSource(plan, SF.profiles, { maxN, maxFields,
       slots: { profile: SF.slotList('profile', SF.profiles, GL.maxSlot(plan, 'profile')),
-               wire: SF.slotList('wire', SF.wires, GL.maxSlot(plan, 'wire')) } });
+               wire: SF.slotList('wire', SF.wires, GL.maxSlot(plan, 'wire')),
+               sweep: SF.slotList('sweep', SF.sweeps, GL.maxSlot(plan, 'sweep')) } });
     const prog = gl.createProgram();
     gl.attachShader(prog, compile(gl, VS, gl.VERTEX_SHADER));
     gl.attachShader(prog, compile(gl, head(maxN, maxFields) + src + TAIL,

@@ -251,6 +251,105 @@ float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
   return best;
 }` },
 
+  // A sweep: a section dragged along a path, at a scale and a roll that may
+  // both vary as it goes. The largest of the slotted primitives, and a direct
+  // transcription of sweep.js's evaluator -- which is the point, because that
+  // evaluator is the one check-sweep holds against tangent fillets, an exact
+  // torus and the kernel's own cone in a slanted frame.
+  //
+  // Each item is one path segment carrying its own frame, span, scale, roll,
+  // caps and turn. The section travels with every segment rather than once per
+  // slot: a few floats repeated, and the compiler folds the branch away since
+  // the kind arrives as a literal.
+  //
+  // Two things here are not obvious and both were bugs first. The rounded
+  // joint revolves the section about *the axis the path turns about* -- a
+  // circular section cannot show the difference, anything else bunches at the
+  // corner. And it is a term of its own rather than something the segment
+  // answers past its end, gated on reach and clamped into the turn.
+  sweep: { fn: 'pSweep', slotted: true, spec: true,
+    src: `float sweepSection(float kind, vec3 sp, float u, float v){
+  if (kind < 0.5) return length(vec2(u, v)) - sp.x;
+  if (kind < 1.5) {
+    float hw = max(sp.x*0.5 - sp.z, 0.0), hh = max(sp.y*0.5 - sp.z, 0.0);
+    float qu = abs(u) - hw, qv = abs(v) - hh;
+    return length(max(vec2(qu, qv), 0.0)) + min(max(qu, qv), 0.0) - sp.z;
+  }
+  return max(length(vec2(u, v)) - sp.x, -v);
+}
+
+float pSweep(sweeppath w, vec3 p, vec3 d, float r){
+  float best = 1e18;
+  int n = swCount(w);
+  for (int i = 0; i < n; i++) {
+    vec3 A = swA(w, i);
+    vec3 T = swT(w, i);
+    vec3 U = swU(w, i);
+    vec3 V = swV(w, i);
+    vec2 K = swK(w, i);
+    vec2 TC = swTurn(w, i);
+    vec3 LS = swLS(w, i);
+    vec2 E = swE(w, i);
+    vec3 M = swMisc(w, i);
+    vec3 C = swCaps(w, i);
+    float kind = swKind(w, i);
+    vec3 sp = swSect(w, i);
+
+    vec3 pa = p - A;
+    float proj = dot(pa, T);
+    float t = proj < 0.0 ? 0.0 : (proj > LS.x ? 1.0 : proj/LS.x);
+    float oStart = -(proj + E.x);
+    float oEnd = proj - (LS.x + E.y);
+    bool atA = oStart > oEnd;
+    float past = atA ? oStart : oEnd;
+    float capped = max(C.x > 0.5 ? oStart : -1e30, C.y > 0.5 ? oEnd : -1e30);
+    float s = LS.y + (LS.z - LS.y)*t;
+    float u0 = dot(pa, U);
+    float v0 = dot(pa, V);
+    float u = u0;
+    float v = v0;
+    if (M.x != 0.0) {
+      float a = M.x*t;
+      float ca = cos(a);
+      float sa = sin(a);
+      u = u0*ca + v0*sa;
+      v = v0*ca - u0*sa;
+    }
+    float d2 = s > 1e-9 ? sweepSection(kind, sp, u/s, v/s)*s : length(vec2(u, v));
+    float raw;
+    if (past > 0.0) raw = d2 <= 0.0 ? past : length(vec2(d2, past));
+    else raw = max(d2, capped);
+    best = min(best, raw/M.y);
+
+    if (C.z > 0.5) {
+      float oJ = proj - LS.x;
+      if (length(vec3(u0, v0, oJ)) - M.z < best*M.y) {
+        float uj = u0;
+        float vj = v0;
+        if (M.x != 0.0) {
+          float ca = cos(M.x);
+          float sa = sin(M.x);
+          uj = u0*ca + v0*sa;
+          vj = v0*ca - u0*sa;
+        }
+        float sJ = LS.z;
+        float pk = uj*K.x + vj*K.y;
+        float pm = vj*K.x - uj*K.y;
+        float beta;
+        float off;
+        if (oJ < 0.0) { beta = pm; off = oJ; }
+        else if (pm*TC.y - oJ*TC.x >= 0.0) { beta = length(vec2(pm, oJ)); off = 0.0; }
+        else { beta = pm*TC.x + oJ*TC.y; off = oJ*TC.x - pm*TC.y; }
+        float p2 = sweepSection(kind, sp, (pk*K.x - beta*K.y)/sJ,
+                                          (pk*K.y + beta*K.x)/sJ)*sJ;
+        float c = (off == 0.0 ? p2 : length(vec2(max(p2, 0.0), abs(off))))/M.y;
+        best = min(best, c);
+      }
+    }
+  }
+  return best;
+}` },
+
   // A profile is the other one whose data cannot travel in the uniform block,
   // and it does not need to: an outline is a few hundred vec2s, and the
   // distance to a polygon is a loop over its edges.
@@ -354,12 +453,21 @@ function call(key, point, dims, round, field) {
 const UNROLL = {
   wire: {
     fn: "pWire", stride: 8, arity: [3, 3, 2],
+    helpers: "",
     pre: "  float best = 1e18;",
     macro: "#define ITEM(SEGA, SEGB, SEGR) {\\\n  vec3 A = SEGA; \\\n  vec3 B = SEGB; \\\n  vec2 rr = SEGR; \\\n  vec3 ba = (B - A); \\\n  vec3 pa = (p - A); \\\n  float l2 = dot(ba, ba); \\\n  float dr = (rr.x - rr.y); \\\n  float a2 = (l2 - (dr * dr)); \\\n  if ((a2 <= 0.0)) { \\\n    best = min(best, min((length(pa) - rr.x), (length((p - B)) - rr.y))); \\\n  } else { \\\n    float il2 = (1.0 / l2); \\\n    float y = dot(pa, ba); \\\n    float z = (y - l2); \\\n    vec3 cx = ((pa * l2) - (ba * y)); \\\n    float x2 = dot(cx, cx); \\\n    float y2 = ((y * y) * l2); \\\n    float z2 = ((z * z) * l2); \\\n    float k = (((sign(dr) * dr) * dr) * x2); \\\n    float dd = 0.0; \\\n    if ((((sign(z) * a2) * z2) > k)) { \\\n      dd = ((sqrt((x2 + z2)) * il2) - rr.y); \\\n    } else { \\\n      if ((((sign(y) * a2) * y2) < k)) { \\\n        dd = ((sqrt((x2 + y2)) * il2) - rr.x); \\\n      } else { \\\n        dd = (((sqrt(((x2 * a2) * il2)) + (y * dr)) * il2) - rr.x); \\\n      } \\\n    } \\\n    best = min(best, dd); \\\n  } }\n",
     post: "  return best;"
   },
+  sweep: {
+    fn: "pSweep", stride: 31, arity: [3, 3, 3, 3, 2, 2, 3, 2, 3, 3, 1, 3],
+    helpers: "float sweepSection(float kind, vec3 sp, float u, float v){\n  if ((kind < 0.5)) {\n    return (length(vec2(u, v)) - sp.x);\n  }\n  if ((kind < 1.5)) {\n    float hw = max(((sp.x * 0.5) - sp.z), 0.0);\n    float hh = max(((sp.y * 0.5) - sp.z), 0.0);\n    float qu = (abs(u) - hw);\n    float qv = (abs(v) - hh);\n    return ((length(max(vec2(qu, qv), 0.0)) + min(max(qu, qv), 0.0)) - sp.z);\n  }\n  return max((length(vec2(u, v)) - sp.x), (-v));\n}\n",
+    pre: "  float best = 1e18;",
+    macro: "#define ITEM(SWA, SWT, SWU, SWV, SWK, SWTURN, SWLS, SWE, SWMISC, SWCAPS, SWKIND, SWSECT) {\\\n  vec3 A = SWA; \\\n  vec3 T = SWT; \\\n  vec3 U = SWU; \\\n  vec3 V = SWV; \\\n  vec2 K = SWK; \\\n  vec2 TC = SWTURN; \\\n  vec3 LS = SWLS; \\\n  vec2 E = SWE; \\\n  vec3 M = SWMISC; \\\n  vec3 C = SWCAPS; \\\n  float kind = SWKIND; \\\n  vec3 sp = SWSECT; \\\n  vec3 pa = (p - A); \\\n  float proj = dot(pa, T); \\\n  float t = ((proj < 0.0) ? 0.0 : ((proj > LS.x) ? 1.0 : (proj / LS.x))); \\\n  float oStart = (-(proj + E.x)); \\\n  float oEnd = (proj - (LS.x + E.y)); \\\n  bool atA = (oStart > oEnd); \\\n  float past = (atA ? oStart : oEnd); \\\n  float capped = max(((C.x > 0.5) ? oStart : (-1e30)), ((C.y > 0.5) ? oEnd : (-1e30))); \\\n  float s = (LS.y + ((LS.z - LS.y) * t)); \\\n  float u0 = dot(pa, U); \\\n  float v0 = dot(pa, V); \\\n  float u = u0; \\\n  float v = v0; \\\n  if ((M.x != 0.0)) { \\\n    float a = (M.x * t); \\\n    float ca = cos(a); \\\n    float sa = sin(a); \\\n    u = ((u0 * ca) + (v0 * sa)); \\\n    v = ((v0 * ca) - (u0 * sa)); \\\n  } \\\n  float d2 = ((s > 1e-9) ? (sweepSection(kind, sp, (u / s), (v / s)) * s) : length(vec2(u, v))); \\\n  float raw; \\\n  if ((past > 0.0)) { \\\n    raw = ((d2 <= 0.0) ? past : length(vec2(d2, past))); \\\n  } else { \\\n    raw = max(d2, capped); \\\n  } \\\n  best = min(best, (raw / M.y)); \\\n  if ((C.z > 0.5)) { \\\n    float oJ = (proj - LS.x); \\\n    if (((length(vec3(u0, v0, oJ)) - M.z) < (best * M.y))) { \\\n      float uj = u0; \\\n      float vj = v0; \\\n      if ((M.x != 0.0)) { \\\n        float ca = cos(M.x); \\\n        float sa = sin(M.x); \\\n        uj = ((u0 * ca) + (v0 * sa)); \\\n        vj = ((v0 * ca) - (u0 * sa)); \\\n      } \\\n      float sJ = LS.z; \\\n      float pk = ((uj * K.x) + (vj * K.y)); \\\n      float pm = ((vj * K.x) - (uj * K.y)); \\\n      float beta; \\\n      float off; \\\n      if ((oJ < 0.0)) { \\\n        beta = pm; \\\n        off = oJ; \\\n      } else { \\\n        if ((((pm * TC.y) - (oJ * TC.x)) >= 0.0)) { \\\n          beta = length(vec2(pm, oJ)); \\\n          off = 0.0; \\\n        } else { \\\n          beta = ((pm * TC.x) + (oJ * TC.y)); \\\n          off = ((oJ * TC.x) - (pm * TC.y)); \\\n        } \\\n      } \\\n      float p2 = (sweepSection(kind, sp, (((pk * K.x) - (beta * K.y)) / sJ), (((pk * K.y) + (beta * K.x)) / sJ)) * sJ); \\\n      float c = (((off == 0.0) ? p2 : length(vec2(max(p2, 0.0), abs(off)))) / M.y); \\\n      best = min(best, c); \\\n    } \\\n  } }\n",
+    post: "  return best;"
+  },
   profile: {
     fn: "pProfile", stride: 4, arity: [2, 2],
+    helpers: "",
     pre: "  float dd = 1e18;\n  bool ins = false;",
     macro: "#define ITEM(EDGEA, EDGEB) {\\\n  vec2 A = EDGEA; \\\n  vec2 B = EDGEB; \\\n  vec2 e = (B - A); \\\n  vec2 w = (p.xy - A); \\\n  vec2 q = (w - (e * clamp((dot(w, e) / dot(e, e)), 0.0, 1.0))); \\\n  dd = min(dd, dot(q, q)); \\\n  bool c1 = (p.y >= A.y); \\\n  bool c2 = (p.y < B.y); \\\n  float cr = ((e.x * w.y) - (e.y * w.x)); \\\n  if ((((c1 && c2) && (cr > 0.0)) || (((!c1) && (!c2)) && (cr < 0.0)))) { \\\n    ins = (!ins); \\\n  } }\n",
     post: "  float da = ((ins ? (-1.0) : 1.0) * sqrt(dd));\n  float db = (abs(p.z) - d.z);\n  return (min(max(da, db), 0.0) + length(max(vec2(da, db), 0.0)));"
@@ -383,7 +491,10 @@ function slotDecl(key, i, items) {
     body += `  ITEM(${args.join(',')});
 `;
   }
-  return `float ${U.fn}${i}(vec3 p, vec3 d){
+  // The helpers the body calls travel with the first slot: a spec source is
+  // not emitted by library(), so nothing else declares them.
+  return (i === 0 ? U.helpers : '')
+    + `float ${U.fn}${i}(vec3 p, vec3 d){
 ${U.pre}
 ${U.macro}${body}#undef ITEM
 ${U.post}

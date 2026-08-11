@@ -529,6 +529,7 @@ function along(path, profile, opts) {
     }
   const reach = R * sMax;
   f.bounds = { lo: lo.map(c => c - reach), hi: hi.map(c => c + reach) };
+  f.seg = seg;
   f.arcLength = total;
   f.segments = seg.length;
   f.radius = R;
@@ -597,7 +598,62 @@ function fromSketch(S, where, profile, opts) {
 }
 const pad = (p) => (p.length > 2 ? p : [p[0], p[1], 0]);
 
-const SinterSweep = { along, fromSketch, PROFILES, profileRadius };
+// The same sweep as *data*: the packed segments the kernel's `sweep` primitive
+// evaluates, so a sweep can be a node in a plan rather than a closure a caller
+// has to sample itself.
+//
+// Everything here is construction -- parallel transport, holonomy, the corner
+// axis, the taper -- which is this file's job. Evaluation is the kernel's, and
+// the two halves meet at this array. `along()` already worked all of it out;
+// this only lays it out in the order the primitive's intrinsics read.
+//
+// The section has to become data too, which is the one thing a closure cannot
+// do: `kind` 0 circle, 1 rect, 2 halfCircle, with up to three parameters. A
+// caller-supplied function still works in `along()` and still meshes, it just
+// cannot cross into a shader.
+const SECTION_KINDS = { circle: 0, rect: 1, halfCircle: 2 };
+const STRIDE = 31;
+
+function pack(path, section, opts) {
+  const kind = SECTION_KINDS[section && section.kind];
+  if (kind === undefined)
+    throw new Error(`sweep.pack wants a section {kind: 'circle'|'rect'|'halfCircle'}`);
+  const a = section.a === undefined ? 1 : section.a;
+  const b = section.b === undefined ? 0 : section.b;
+  const c = section.c === undefined ? 0 : section.c;
+  const profile = kind === 0 ? PROFILES.circle(a)
+                : kind === 1 ? PROFILES.rect(a, b, c)
+                :              PROFILES.halfCircle(a);
+  const f = along(path, profile, opts);
+  const S = f.seg;
+  const segs = new Float64Array(S.length * STRIDE);
+  S.forEach((g, i) => {
+    const o = i * STRIDE;
+    segs[o] = g.ax; segs[o + 1] = g.ay; segs[o + 2] = g.az;
+    segs[o + 3] = g.tx; segs[o + 4] = g.ty; segs[o + 5] = g.tz;
+    segs[o + 6] = g.ux; segs[o + 7] = g.uy; segs[o + 8] = g.uz;
+    segs[o + 9] = g.vx; segs[o + 10] = g.vy; segs[o + 11] = g.vz;
+    segs[o + 12] = g.k1u; segs[o + 13] = g.k1v;
+    segs[o + 14] = g.turnC; segs[o + 15] = g.turnS;
+    segs[o + 16] = g.L; segs[o + 17] = g.sA; segs[o + 18] = g.sB;
+    segs[o + 19] = g.e0; segs[o + 20] = g.e1;
+    segs[o + 21] = g.dw; segs[o + 22] = g.taper; segs[o + 23] = g.reach1;
+    segs[o + 24] = g.capA ? 1 : 0; segs[o + 25] = g.capB ? 1 : 0;
+    segs[o + 26] = g.round1 ? 1 : 0;
+    segs[o + 27] = kind; segs[o + 28] = a; segs[o + 29] = b; segs[o + 30] = c;
+  });
+  const h = [0, 1, 2].map(k => Math.max(Math.abs(f.bounds.lo[k]), Math.abs(f.bounds.hi[k])));
+  return {
+    sweep: { name: (opts && opts.name) || 'sweep', segs, kind, sect: [a, b, c] },
+    node: { t: 'sweep', on: true, op: 'add', k: 0, b: 0, round: 0,
+            mx: false, my: false, mz: false,
+            p: [0, 0, 0], r: [0, 0, 0], d: h, fi: (opts && opts.fi) || 0 },
+    f
+  };
+}
+
+const SinterSweep = { along, fromSketch, PROFILES, profileRadius,
+                      pack, SECTION_KINDS, STRIDE };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterSweep;
 root.SinterSweep = SinterSweep;
 })(typeof self !== 'undefined' ? self : globalThis);

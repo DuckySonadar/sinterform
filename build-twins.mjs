@@ -57,6 +57,19 @@ const INTRINSICS = {
   segR:        { t: 'vec2',  js: ['segRA($0, $1)', 'segRB($0, $1)'] },
   // one JS expression per component, so a vec2 intrinsic does not have to be
   // called twice to be taken apart
+  swCount:     { t: 'int',   js: 'swCount($0)' },
+  swA:    { t: 'vec3', js: ['swf($0,$1,0)', 'swf($0,$1,1)', 'swf($0,$1,2)'] },
+  swT:    { t: 'vec3', js: ['swf($0,$1,3)', 'swf($0,$1,4)', 'swf($0,$1,5)'] },
+  swU:    { t: 'vec3', js: ['swf($0,$1,6)', 'swf($0,$1,7)', 'swf($0,$1,8)'] },
+  swV:    { t: 'vec3', js: ['swf($0,$1,9)', 'swf($0,$1,10)', 'swf($0,$1,11)'] },
+  swK:    { t: 'vec2', js: ['swf($0,$1,12)', 'swf($0,$1,13)'] },
+  swTurn: { t: 'vec2', js: ['swf($0,$1,14)', 'swf($0,$1,15)'] },
+  swLS:   { t: 'vec3', js: ['swf($0,$1,16)', 'swf($0,$1,17)', 'swf($0,$1,18)'] },
+  swE:    { t: 'vec2', js: ['swf($0,$1,19)', 'swf($0,$1,20)'] },
+  swMisc: { t: 'vec3', js: ['swf($0,$1,21)', 'swf($0,$1,22)', 'swf($0,$1,23)'] },
+  swCaps: { t: 'vec3', js: ['swf($0,$1,24)', 'swf($0,$1,25)', 'swf($0,$1,26)'] },
+  swKind: { t: 'float', js: 'swf($0,$1,27)' },
+  swSect: { t: 'vec3', js: ['swf($0,$1,28)', 'swf($0,$1,29)', 'swf($0,$1,30)'] },
   edgeA:       { t: 'vec2',  js: ['edgeAx($0, $1)', 'edgeAy($0, $1)'] },
   edgeB:       { t: 'vec2',  js: ['edgeBx($0, $1)', 'edgeBy($0, $1)'] }
 };
@@ -67,7 +80,8 @@ const NODE_ARG = '$node';
 const OPAQUE = {
   sampler3D: `fields[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
   outline:   `profiles[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
-  polyline:  `wires[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`
+  polyline:  `wires[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
+  sweeppath: `sweeps[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`
 };
 
 // ---------------------------------------------------------------- tokens ----
@@ -108,6 +122,17 @@ function lex(src) {
 // AST is deliberately dumb -- types are worked out during emission, where the
 // scope is, rather than in a pass of its own.
 const TYPES = new Set(['float', 'vec2', 'vec3', 'void', 'bool', 'int']);
+// GLSL ES 3.00 keywords that are legal JavaScript identifiers, so a name like
+// `out` translates cleanly and then fails to compile as a shader. Caught here
+// instead: a parse error at generation beats a shader error at run time.
+const RESERVED_GLSL = new Set([
+  'in', 'out', 'inout', 'uniform', 'varying', 'attribute', 'const', 'centroid',
+  'flat', 'smooth', 'layout', 'precision', 'invariant', 'discard', 'sample',
+  'patch', 'subroutine', 'buffer', 'shared', 'coherent', 'volatile',
+  'restrict', 'readonly', 'writeonly', 'noperspective', 'lowp', 'mediump',
+  'highp', 'struct', 'switch', 'case', 'default', 'do', 'while', 'break',
+  'continue', 'true', 'false'
+]);
 const BIN = [['||', 1], ['&&', 2], ['==', 3], ['!=', 3],
              ['<', 4], ['>', 4], ['<=', 4], ['>=', 4],
              ['+', 5], ['-', 5], ['*', 6], ['/', 6]];
@@ -225,6 +250,8 @@ function parse(src) {
       const decls = [];
       for (;;) {
         const name = eat('id').v;
+        if (RESERVED_GLSL.has(name))
+          throw new Error(`\`${name}\` is a GLSL keyword and cannot be a variable`);
         let init = null;
         if (is('op', '=')) { next(); init = expr(); }
         decls.push({ name, init });
@@ -277,7 +304,7 @@ function parse(src) {
 const WIDTH = { float: 1, vec2: 2, vec3: 3, bool: 1, int: 1 };
 const SWZ = { x: 0, y: 1, z: 2, r: 0, g: 1, b: 2 };
 
-function emit(fn) {
+function emit(fn, helpers, flatParams) {
   const lines = [];
   const scope = new Map();
   let tmp = 0;
@@ -415,6 +442,16 @@ function emit(fn) {
       return val(w.t, w.a.map((s, i) =>
         `(${s} - ${w.b[i]}*Math.floor(${s}/${w.b[i]}))`));
     }
+    // a helper defined in the same source: translated too, and called with
+    // its vector arguments flattened into scalars
+    const h = (helpers || {})[f];
+    if (h) {
+      const flat = [];
+      for (const a of A) flat.push(...a.p);
+      if (flat.length !== h.arity)
+        throw new Error(`${f}() wants ${h.arity} components, got ${flat.length}`);
+      return val('float', [`${f}(${flat.join(', ')})`]);
+    }
     throw new Error(`no JS translation for ${f}()`);
   }
 
@@ -516,10 +553,16 @@ function emit(fn) {
     }
     const n = wide(prm.t);
     if (!n) throw new Error(`unsupported parameter type ${prm.t}`);
-    args.push(prm.name);
-    if (n === 1) { scope.set(prm.name, { t: prm.t, names: [prm.name] }); continue; }
+    if (n === 1) { args.push(prm.name); scope.set(prm.name, { t: prm.t, names: [prm.name] }); continue; }
     const names = [0, 1, 2].slice(0, n).map(i => `${prm.name}_${i}`);
-    lines.push(`let ${names.map((nm, i) => `${nm} = ${prm.name}[${i}]`).join(', ')};`);
+    // A primitive is called with arrays, so its vectors are destructured here.
+    // A helper is called by generated code, which flattens them at the call
+    // site -- so its components arrive as separate arguments already.
+    if (flatParams) { args.push(...names); }
+    else {
+      args.push(prm.name);
+      lines.push(`let ${names.map((nm, i) => `${nm} = ${prm.name}[${i}]`).join(', ')};`);
+    }
     scope.set(prm.name, { t: prm.t, names });
   }
   // `hold` and the parameter prologue write at depth 0; statements indent
@@ -665,12 +708,22 @@ function unroller(key, fn) {
   };
 }
 
+// A helper defined beside the primitive, printed back out as GLSL. A `spec`
+// source is not emitted by `library()`, so anything it calls has to travel
+// with the unrolled function instead.
+function glslFn(fn) {
+  const args = fn.params.map(p => `${p.t} ${p.name}`).join(', ');
+  return `float ${fn.fname}(${args}){\n`
+    + fn.body.map(st => glslStmt(st, null, '  ')).join('\n') + '\n}\n';
+}
+
 // ------------------------------------------------------------------ main ----
 const mod = { exports: {} };
 new Function('module', readFileSync(join(HERE, 'glsl.js'), 'utf8'))(mod);
 const GL = mod.exports;
 
 const parts = [];
+const helperParts = [];
 const done = [];
 const slots = [];
 for (const key of GL.KEYS) {
@@ -681,8 +734,20 @@ for (const key of GL.KEYS) {
   const want = GL.GLSL[key].fn;
   const fn = fns.find(f => f.fname === want);
   if (!fn) throw new Error(`${key}: no function named ${want} in its source`);
+
+  // Anything else in the source is a helper: translated the same way, called
+  // with its vector arguments flattened.
+  const helpers = {};
+  for (const h of fns) {
+    if (h === fn || h.fname in INTRINSICS) continue;
+    let ho;
+    try { ho = emit(h, helpers, true); } catch (e) { throw new Error(`${key}/${h.fname}: ${e.message}`); }
+    helpers[h.fname] = { arity: ho.args.length };
+    helperParts.push(`// ${h.fname} — from GLSL.${key}.src\n`
+      + `function ${h.fname}(${ho.args.join(', ')}) {\n${ho.body}\n}`);
+  }
   let out;
-  try { out = emit(fn); } catch (e) { throw new Error(`${key}: ${e.message}`); }
+  try { out = emit(fn, helpers); } catch (e) { throw new Error(`${key}: ${e.message}`); }
   parts.push(`  // ${fn.fname} — from GLSL.${key}.src\n`
     + `  ${key}: (${out.args.join(', ')}) => {\n${out.body}\n  },`);
   done.push(key);
@@ -691,6 +756,7 @@ for (const key of GL.KEYS) {
   if (GL.GLSL[key].slotted) {
     let u;
     try { u = unroller(key, fn); } catch (e) { throw new Error(`${key}: ${e.message}`); }
+    u.helpers = fns.filter(h => h !== fn && !(h.fname in INTRINSICS)).map(glslFn).join('');
     slots.push({ key, fn: want, u });
   }
 }
@@ -714,6 +780,7 @@ const unrollBlock = `// --------------------------------------------------------
 const UNROLL = {
 ${slots.map(({ key, fn, u }) => `  ${key}: {
     fn: ${q(fn)}, stride: ${u.stride}, arity: [${u.params.map(p => p.width).join(', ')}],
+    helpers: ${q(u.helpers || '')},
     pre: ${q(u.pre)},
     macro: ${q(u.macro)},
     post: ${q(u.post)}
@@ -736,7 +803,10 @@ function slotDecl(key, i, items) {
     }
     body += \`  ITEM(\${args.join(',')});\n\`;
   }
-  return \`float \${U.fn}\${i}(vec3 p, vec3 d){\n\${U.pre}\n\${U.macro}\${body}#undef ITEM\n\${U.post}\n}\n\`;
+  // The helpers the body calls travel with the first slot: a spec source is
+  // not emitted by library(), so nothing else declares them.
+  return (i === 0 ? U.helpers : '')
+    + \`float \${U.fn}\${i}(vec3 p, vec3 d){\n\${U.pre}\n\${U.macro}\${body}#undef ITEM\n\${U.post}\n}\n\`;
 }
 
 // Every slot the shader must be able to name. A node may refer to a slot the
@@ -760,6 +830,7 @@ const block = `// --------------------------------------------------------------
 // fails if this block is stale, and check-glsl proves the translation is
 // faithful by running both on the same points.
 // ---------------------------------------------------------------------------
+${helperParts.join('\n')}
 const TWINS = {
 ${parts.join('\n')}
 };

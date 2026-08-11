@@ -84,6 +84,7 @@
 <script src="glsl.js"></script>
 <script src="sketch.js"></script>
 <script src="sketch3d.js"></script>
+<script src="sweep.js"></script>
 <script src="glmesh.js"></script>
 <script src="viewer.js"></script>
 <script>
@@ -253,6 +254,25 @@ const SCENES = {
       N('box', { p: [0, 0, 6], d: [70, 46, 12], round: 3, k: 5 }),
       N('wire', node)
     ] }];
+  },
+
+  // A rectangular section dragged along a sketched curve through space, growing
+  // and rolling as it goes. One node: the frames, the corner axis and the taper
+  // were all worked out by sweep.js and packed into the document.
+  'sweep, tapered and twisted': () => {
+    const S = new SinterSketch3D.Sketch3D();
+    const curve = S.nurbs([S.point(-20, -9, 0), S.point(-5, 11, 6),
+                           S.point(11, -6, 13), S.point(20, 9, 21)]);
+    // Every fourth sample: a sweep costs O(segments) *per raymarch step*, so a
+    // finely sampled path is far more expensive to draw than to mesh. A dozen
+    // segments still shows the taper, the roll and the corner fill.
+    const fine = S.sample(curve, 0.4);
+    const path = fine.filter((_, i) => i % 4 === 0 || i === fine.length - 1);
+    const { sweep, node } = SinterSweep.pack(path, { kind: 'rect', a: 7, b: 3, c: 0.8 },
+      { scale: (t) => 0.7 + 0.9 * t, twist: 2.2, name: 'demo sweep' });
+    SinterForm.sweeps = [sweep];
+    node.p[2] += 6;
+    return [{ id: 0, nodes: [N('sweep', node)] }];
   },
 
   'ice cream': () => [{ id: 0, nodes: [

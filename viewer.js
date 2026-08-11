@@ -163,6 +163,7 @@ function fragSource(plan) {
   return { src: PREAMBLE + `${GL.library()}\n`
     + `${GL.slotDecls('profile', slotsOf('profile', SF.profiles), GL.maxSlot(view.plan, 'profile'))}\n`
     + `${GL.slotDecls('wire', slotsOf('wire', SF.wires), GL.maxSlot(view.plan, 'wire'))}\n`
+    + `${GL.slotDecls('sweep', slotsOf('sweep', SF.sweeps), GL.maxSlot(view.plan, 'sweep'))}\n`
     + `float map(vec3 P){\n`
     + `  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n` + TAIL, at };
 }

@@ -990,5 +990,76 @@ console.log('\n--- along a 3D sketch ---');
   near(l.arcLength, 80, 1e-6, 'and { loop } still means what it always did');
 }
 
+// ======================================================================
+console.log('\n--- and as a kernel primitive ---');
+{
+  // `pack()` hands the same sweep to the kernel as packed segments, so it can
+  // be a node in a plan: blended, cut, meshed, raymarched. The claim is that
+  // it is the *same* solid, and the bar is bit-for-bit rather than close --
+  // the primitive's GLSL was transcribed from this file's evaluator, and the
+  // JS twin was generated from that GLSL, so anything less than exact means a
+  // step of that chain lost something.
+  const SF = (() => {
+    const m = { exports: {} };
+    new Function('module', readFileSync(join(HERE, 'sinterform.js'), 'utf8'))(m);
+    return m.exports;
+  })();
+
+  const flat = [], space = [], loop = [];
+  for (let i = 0; i <= 30; i++) {
+    const t = i / 30 * Math.PI * 1.2;
+    flat.push([28 * Math.cos(t), 28 * Math.sin(t), 0]);
+  }
+  for (let i = 0; i <= 30; i++) {
+    const t = i / 30 * Math.PI * 1.4;
+    space.push([28 * Math.cos(t), 28 * Math.sin(t), 9 * Math.sin(3 * t)]);
+  }
+  for (let i = 0; i < 36; i++) {
+    const t = i / 36 * 2 * Math.PI;
+    loop.push([25 * Math.cos(t), 25 * Math.sin(t), 4 * Math.sin(2 * t)]);
+  }
+
+  const cases = [
+    ['circle, flat', flat, { kind: 'circle', a: 4 }, {}],
+    ['circle, through space', space, { kind: 'circle', a: 4 }, {}],
+    ['rect, space', space, { kind: 'rect', a: 9, b: 4 }, {}],
+    ['rect rounded', space, { kind: 'rect', a: 9, b: 4, c: 1.2 }, {}],
+    ['halfCircle', flat, { kind: 'halfCircle', a: 5 }, {}],
+    ['tapered 1 → 2.5', space, { kind: 'circle', a: 4 }, { scale: (t) => 1 + 1.5 * t }],
+    ['twisted rect', space, { kind: 'rect', a: 9, b: 3 }, { twist: Math.PI }],
+    ['twist and taper', space, { kind: 'rect', a: 8, b: 3 }, { twist: 2, scale: (t) => 1 + t }],
+    ['closed loop', loop, { kind: 'circle', a: 3.5 }, { closed: true }],
+    ['miter join', flat, { kind: 'rect', a: 7, b: 3 }, { join: 'miter' }]
+  ];
+
+  let sd = 0x5bf03635;
+  const q = () => { sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; };
+  let worstAll = 0, boundsOk = 0;
+  for (const [what, path, sect, opts] of cases) {
+    const { sweep, node, f } = SW.pack(path, sect, opts);
+    SF.sweeps = [sweep];
+    const plan = [{ id: 0, nodes: [node] }];
+    let worst = 0;
+    for (let i = 0; i < 30000; i++) {
+      const p = [(q() * 2 - 1) * 45, (q() * 2 - 1) * 45, (q() * 2 - 1) * 25];
+      worst = Math.max(worst, Math.abs(f(...p) - SF.sceneSDF(plan, ...p)));
+    }
+    worstAll = Math.max(worstAll, worst);
+    if ([0, 1, 2].every(k => node.d[k] + 1e-9 >=
+        Math.max(Math.abs(f.bounds.lo[k]), Math.abs(f.bounds.hi[k])))) boundsOk++;
+  }
+  ok(worstAll === 0, `the primitive is along(), exactly, over ${cases.length} `
+    + `configurations` + (worstAll ? ` — worst ${worstAll.toExponential(2)} mm` : ''));
+  ok(boundsOk === cases.length, `and every packed node's bounds contain it `
+    + `(${boundsOk}/${cases.length})`);
+
+  // A section that is not one of the three cannot cross into a shader, and
+  // saying so at pack time beats drawing the wrong thing.
+  let threw = null;
+  try { SW.pack(flat, (u, v) => Math.hypot(u, v) - 3, {}); }
+  catch (e) { threw = e; }
+  ok(threw, 'and a caller-supplied section function is refused, not silently wrong');
+}
+
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);
 process.exit(fail ? 1 : 0);

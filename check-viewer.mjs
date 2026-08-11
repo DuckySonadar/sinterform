@@ -61,6 +61,13 @@ const SCENES = ['every primitive', 'booleans', 'two bodies, no blend across',
                 'sketch 2D, extruded', 'sketch 3D, extruded',
                 // one node, N round cones, blended into a block
                 'wire, tapered and blended'];
+// `sweep, tapered and twisted` is in the viewer but deliberately not here. A
+// slotted primitive costs O(items) per sample and a sweep's item is the
+// heaviest of them, so meshing that scene under a software rasteriser takes
+// tens of seconds -- long enough that the screenshot races the mesh. It is not
+// unchecked: check-glsl compares its unrolled shader against the JS twin per
+// point, and check-sweep holds the JS twin bit-for-bit against the closure the
+// segments were packed from, which is a stronger statement than a silhouette.
 const RES = 0.9;
 
 const browser = await chromium.launch({

@@ -30,7 +30,7 @@ const TOL = 2e-3;          // mm; fp32 in the shader against fp64 in node
 // orders under the finest thing this prints, and not a formula difference.
 // Anything using sin/cos/atan gets the looser bar; everything else stays
 // tight, because a real drift between the twins would be far larger.
-const LOOSE = { prism: 3e-2 };
+const LOOSE = { prism: 3e-2, sweep: 3e-2 };
 const N = 64;              // N*N points per primitive
 
 const mod = { exports: {} };
@@ -171,6 +171,34 @@ const cases = KEYS.map(k => {
   cases.push({ key: 'wireDefault', fn: 'pWire0', glsl: GL.slotDecls('wire', [SF.slotItems('wire', undefined)], 1),
                name: 'Wire (empty slot → default)', d, r: 0, slotted: true,
                js: (p, dd, r) => SF.PRIMS.wire.js(p, dd, r, { fi: 99 }), pts });
+}
+
+// `sweep`: the largest of the slotted primitives, and the one whose unrolled
+// body is a straight transcription of sweep.js's evaluator. Tapered, twisted
+// and through space, so the frame, the taper divisor and the rounded joint --
+// the three things that were bugs first -- are all exercised.
+{
+  const smod = { exports: {} };
+  new Function('module', readFileSync(join(HERE, 'sweep.js'), 'utf8'))(smod);
+  const SW = smod.exports;
+  const path = [];
+  for (let i = 0; i <= 18; i++) {
+    const t = i / 18 * Math.PI * 1.3;
+    path.push([20 * Math.cos(t), 20 * Math.sin(t), 6 * Math.sin(2 * t)]);
+  }
+  const packed = SW.pack(path, { kind: 'rect', a: 8, b: 4, c: 1 },
+                         { scale: (t) => 1 + 0.8 * t, twist: 1.1 });
+  SF.sweeps = [packed.sweep];
+  const d = packed.node.d;
+  const pts = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.4;
+    pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.4;
+    pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 1.6;
+  }
+  cases.push({ key: 'sweep', fn: 'pSweep0',
+               glsl: GL.slotDecls('sweep', [SF.slotItems('sweep', SF.sweeps[0])], 1),
+               name: SF.PRIMS.sweep.name, d, r: 0, slotted: true, pts });
 }
 
 // And `field`, which until now was the only primitive with no per-point check

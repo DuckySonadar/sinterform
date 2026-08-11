@@ -12,7 +12,7 @@ STL output. Dependency-free JavaScript.
 | `glmesh.js` | optional: fills the mesher's grid on the GPU instead of in JS |
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
 | `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
-| `sweep.js` | a profile dragged along a sketch path, flat or through space |
+| `sweep.js` | a section dragged along a sketch path, and `pack()` to make it a node |
 | `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
 | `demo3d.html` | the 3D sketcher, drawn rough and solved in front of you |
 
@@ -409,6 +409,38 @@ one of the three the shape actually reads.
 
 `profiles` is a getter/setter pair with the same rule as `fields`: assign to
 `SinterForm.profiles`, never write through a captured local.
+
+### Sweeps
+
+A section dragged along a path, at a scale and a roll that may both vary. The
+largest of the slotted primitives, and the only one whose items are not raw
+geometry: each is a path segment carrying the frame, span, scale, roll, caps and
+turn that `sweep.js` worked out for it.
+
+```js
+const { sweep, node } = SinterSweep.pack(path, { kind: 'rect', a: 9, b: 4, c: 1 },
+                                         { scale: (t) => 1 + t, twist: 2 });
+SinterForm.sweeps = [sweep];
+```
+
+The split is the point. Construction — parallel transport, holonomy, the corner
+axis, the taper divisor — stays in `sweep.js`, which is where it was worked out
+and where `check-sweep` holds it against tangent fillets, an exact torus and the
+kernel's own cone in a slanted frame. Evaluation is the kernel's. The two meet
+at a flat array of segments.
+
+**The section has to become data**, which is the one thing a closure cannot do:
+`kind` is `'circle'`, `'rect'` or `'halfCircle'`, with up to three parameters. A
+caller-supplied `(u, v) → mm` function still works in `along()` and still meshes
+— it just cannot cross into a shader, and `pack()` refuses it rather than
+drawing something else.
+
+The kernel's `sweep` primitive is a direct transcription of `along()`'s
+evaluator, and `check-sweep` holds the two **bit-for-bit** across ten
+configurations — flat, through space, tapered, twisted, closed, mitered, all
+three sections. Not "close": the GLSL was transcribed from that evaluator and
+the JS twin generated from the GLSL, so anything but exact means a step of that
+chain lost something.
 
 ### Wires
 

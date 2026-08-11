@@ -75,6 +75,12 @@ let profiles = [];       // [{ name, loops: [[[x, y], ...], ...] }]
 // and a node of type `wire` refers to one by index.
 let wires = [];          // [{ name, lines: [[[x, y, z, r], ...], ...] }]
 
+// Sweeps: a section dragged along a path. The largest of the document shapes,
+// and the only one whose items are not raw geometry -- each is a path segment
+// carrying the frame, span, scale, roll, caps and turn that sweep.js worked
+// out for it. `SinterSweep.pack()` builds them; this file only evaluates.
+let sweeps = [];         // [{ name, segs: Float64Array, kind, sect: [a, b, c] }]
+
 // iq's polygon distance: nearest edge for the magnitude, a crossing count for
 // the sign. Loops beyond the first are holes -- a point inside an odd number
 // of them is outside the material. Exact, and 1-Lipschitz.
@@ -168,9 +174,32 @@ function segRB(w, i) { return wireSegments(w)[8 * i + 7]; }
 // constructs the data, and glsl.js turns data into source. An absent entry
 // gets the primitive's default, so an empty slot is a shape rather than a
 // compile error, and the default is written down once, here.
+// A sweep's items come pre-packed, because building them needs parallel
+// transport, holonomy and the corner axis -- construction that belongs to
+// sweep.js and not to an evaluator. An empty slot is a plain straight run, so
+// the primitive still draws something before an application feeds it.
+const SWEEP_STRIDE = 31;
+const DEFAULT_SWEEP = (() => {
+  const L = 20, e = new Array(SWEEP_STRIDE).fill(0);
+  e[0] = -10; e[3] = 1; e[6] = 0; e[7] = 1; e[11] = 1;      // A, T=+x, U=+y, V=+z
+  e[12] = 0; e[13] = 1;                                      // turn axis, unused
+  e[16] = L; e[17] = 1; e[18] = 1;                           // span, scale 1 -> 1
+  e[21] = 0; e[22] = 1; e[23] = 0;                           // dw, taper, reach
+  e[24] = 1; e[25] = 1; e[26] = 0;                           // capA, capB, no join
+  e[27] = 0; e[28] = 3;                                      // circle, r = 3
+  return e;
+})();
+function sweepSegs(w) {
+  const s = w && w.segs;
+  return (s && s.length >= SWEEP_STRIDE) ? s : DEFAULT_SWEEP;
+}
+function swCount(w) { return Math.floor(sweepSegs(w).length / SWEEP_STRIDE); }
+function swf(w, i, k) { return sweepSegs(w)[SWEEP_STRIDE * i + k]; }
+
 function slotItems(t, obj) {
   if (t === 'wire') return wireSegments(obj);
   if (t === 'profile') return outlineEdges(obj);
+  if (t === 'sweep') return sweepSegs(obj);
   throw new Error('not a slotted primitive: ' + t);
 }
 
@@ -317,6 +346,20 @@ function sampleField(f, x, y, z) {
 // fails if this block is stale, and check-glsl proves the translation is
 // faithful by running both on the same points.
 // ---------------------------------------------------------------------------
+// sweepSection — from GLSL.sweep.src
+function sweepSection(kind, sp_0, sp_1, sp_2, u, v) {
+    if ((kind < 0.5)) {
+      return (Math.hypot(u, v) - sp_0);
+    }
+    if ((kind < 1.5)) {
+      let hw = Math.max(((sp_0 * 0.5) - sp_2), 0.0);
+      let hh = Math.max(((sp_1 * 0.5) - sp_2), 0.0);
+      let qu = (Math.abs(u) - hw);
+      let qv = (Math.abs(v) - hh);
+      return ((Math.hypot(Math.max(qu, 0.0), Math.max(qv, 0.0)) + Math.min(Math.max(qu, qv), 0.0)) - sp_2);
+    }
+    return Math.max((Math.hypot(u, v) - sp_0), (-v));
+}
 const TWINS = {
   // pSphere — from GLSL.sphere.src
   sphere: (p, d, r) => {
@@ -566,6 +609,99 @@ const TWINS = {
     }
     return best;
   },
+  // pSweep — from GLSL.sweep.src
+  sweep: (p, d, r, $node) => {
+    const w = sweeps[($node && $node.fi) || 0];
+    let p_0 = p[0], p_1 = p[1], p_2 = p[2];
+    let d_0 = d[0], d_1 = d[1], d_2 = d[2];
+    let best = 1e18;
+    let n = swCount(w);
+    let i = 0;
+    for (; (i < n);) {
+      let A_0 = swf(w,i,0), A_1 = swf(w,i,1), A_2 = swf(w,i,2);
+      let T_0 = swf(w,i,3), T_1 = swf(w,i,4), T_2 = swf(w,i,5);
+      let U_0 = swf(w,i,6), U_1 = swf(w,i,7), U_2 = swf(w,i,8);
+      let V_0 = swf(w,i,9), V_1 = swf(w,i,10), V_2 = swf(w,i,11);
+      let K_0 = swf(w,i,12), K_1 = swf(w,i,13);
+      let TC_0 = swf(w,i,14), TC_1 = swf(w,i,15);
+      let LS_0 = swf(w,i,16), LS_1 = swf(w,i,17), LS_2 = swf(w,i,18);
+      let E_0 = swf(w,i,19), E_1 = swf(w,i,20);
+      let M_0 = swf(w,i,21), M_1 = swf(w,i,22), M_2 = swf(w,i,23);
+      let C_0 = swf(w,i,24), C_1 = swf(w,i,25), C_2 = swf(w,i,26);
+      let kind = swf(w,i,27);
+      let sp_0 = swf(w,i,28), sp_1 = swf(w,i,29), sp_2 = swf(w,i,30);
+      let pa_0 = (p_0 - A_0), pa_1 = (p_1 - A_1), pa_2 = (p_2 - A_2);
+      let proj = (pa_0*T_0 + pa_1*T_1 + pa_2*T_2);
+      const t0 = (proj < 0.0);
+      const t1 = (proj > LS_0);
+      let t = (t0 ? 0.0 : (t1 ? 1.0 : (proj / LS_0)));
+      let oStart = (-(proj + E_0));
+      let oEnd = (proj - (LS_0 + E_1));
+      let atA = (oStart > oEnd);
+      let past = (atA ? oStart : oEnd);
+      const t2 = (C_0 > 0.5);
+      const t3 = (C_1 > 0.5);
+      let capped = Math.max((t2 ? oStart : (-1e30)), (t3 ? oEnd : (-1e30)));
+      let s = (LS_1 + ((LS_2 - LS_1) * t));
+      let u0 = (pa_0*U_0 + pa_1*U_1 + pa_2*U_2);
+      let v0 = (pa_0*V_0 + pa_1*V_1 + pa_2*V_2);
+      let u = u0;
+      let v = v0;
+      if ((M_0 != 0.0)) {
+        let a = (M_0 * t);
+        let ca = Math.cos(a);
+        let sa = Math.sin(a);
+        u = ((u0 * ca) + (v0 * sa));
+        v = ((v0 * ca) - (u0 * sa));
+      }
+      const t4 = (s > 1e-9);
+      let d2 = (t4 ? (sweepSection(kind, sp_0, sp_1, sp_2, (u / s), (v / s)) * s) : Math.hypot(u, v));
+      let raw;
+      if ((past > 0.0)) {
+        const t5 = (d2 <= 0.0);
+        raw = (t5 ? past : Math.hypot(d2, past));
+      } else {
+        raw = Math.max(d2, capped);
+      }
+      best = Math.min(best, (raw / M_1));
+      if ((C_2 > 0.5)) {
+        let oJ = (proj - LS_0);
+        if (((Math.hypot(u0, v0, oJ) - M_2) < (best * M_1))) {
+          let uj = u0;
+          let vj = v0;
+          if ((M_0 != 0.0)) {
+            let ca = Math.cos(M_0);
+            let sa = Math.sin(M_0);
+            uj = ((u0 * ca) + (v0 * sa));
+            vj = ((v0 * ca) - (u0 * sa));
+          }
+          let sJ = LS_2;
+          let pk = ((uj * K_0) + (vj * K_1));
+          let pm = ((vj * K_0) - (uj * K_1));
+          let beta;
+          let off;
+          if ((oJ < 0.0)) {
+            beta = pm;
+            off = oJ;
+          } else {
+            if ((((pm * TC_1) - (oJ * TC_0)) >= 0.0)) {
+              beta = Math.hypot(pm, oJ);
+              off = 0.0;
+            } else {
+              beta = ((pm * TC_0) + (oJ * TC_1));
+              off = ((oJ * TC_0) - (pm * TC_1));
+            }
+          }
+          let p2 = (sweepSection(kind, sp_0, sp_1, sp_2, (((pk * K_0) - (beta * K_1)) / sJ), (((pk * K_1) + (beta * K_0)) / sJ)) * sJ);
+          const t6 = (off == 0.0);
+          let c = ((t6 ? p2 : Math.hypot(Math.max(p2, 0.0), Math.abs(off))) / M_1);
+          best = Math.min(best, c);
+        }
+      }
+      i += 1;
+    }
+    return best;
+  },
   // pProfile — from GLSL.profile.src
   profile: (p, d, r, $node) => {
     const o = profiles[($node && $node.fi) || 0];
@@ -772,6 +908,16 @@ const PRIMS = {
     // tapered run rather than nothing at all
     def: [12, 2, 2],
     js: TWINS.wire,
+    ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
+  },
+  // A section dragged along a path. Its dims are purely the bounds: everything
+  // about the shape is in the packed segments on the document.
+  sweep: {
+    name: 'Sweep', round: false, baked: true,
+    dims: [['Half width', 0.5, 400, 0.5], ['Half depth', 0.5, 400, 0.5],
+           ['Half height', 0.5, 400, 0.5]],
+    def: [13, 3, 3],
+    js: TWINS.sweep,
     ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
   },
   profile: {
@@ -1067,8 +1213,10 @@ const SinterForm = {
   set profiles(v) { profiles = v; },
   get wires() { return wires; },
   set wires(v) { wires = v; },
+  get sweeps() { return sweeps; },
+  set sweeps(v) { sweeps = v; },
   decodeField, encodeField, sampleField,
-  polygonSDF, profileExtent, wireExtent, slotItems, slotList,
+  polygonSDF, profileExtent, wireExtent, slotItems, slotList, SWEEP_STRIDE,
   smin, smax, invRot, roundSlot,
   sceneSDF, sceneBounds, surfaceNets, mesh, meshToSTL
 };

@@ -72,7 +72,25 @@ SF.wires = [{ name: 'test L', lines: TEST_WIRE }];
 // bounds, so the side-loaded data decides them rather than `def`. Using `def`
 // here would test the default shape's box against the test shape's geometry,
 // which is a failure with nothing wrong behind it.
-const DIMS = { wire: SF.wireExtent(TEST_WIRE) };
+// `sweep` too, and its data has to come from sweep.js, which is the file that
+// knows about transport and corners. A path through space with a rectangular
+// section, tapered and twisted, so the frame, the taper divisor and the corner
+// term are all in play rather than a straight tube.
+const SW = (() => {
+  const m = { exports: {} };
+  new Function('module', readFileSync(join(HERE, 'sweep.js'), 'utf8'))(m);
+  return m.exports;
+})();
+const SWPATH = [];
+for (let i = 0; i <= 24; i++) {
+  const t = i / 24 * Math.PI * 1.3;
+  SWPATH.push([22 * Math.cos(t), 22 * Math.sin(t), 7 * Math.sin(2 * t)]);
+}
+const PACKED = SW.pack(SWPATH, { kind: 'rect', a: 8, b: 4, c: 1 },
+                       { scale: (t) => 1 + 0.8 * t, twist: 1.1 });
+SF.sweeps = [PACKED.sweep];
+
+const DIMS = { wire: SF.wireExtent(TEST_WIRE), sweep: PACKED.node.d };
 
 let worstEver = 0, worstWho = '';
 
