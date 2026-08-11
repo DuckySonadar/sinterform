@@ -275,7 +275,8 @@ function parse(src) {
   // caller picks the one it wants and skips the intrinsics.
   const fns = [];
   while (!is('eof')) {
-    eat('id', 'float');
+    const ret = eat('id').v;
+    if (!TYPES.has(ret)) throw new Error(`expected a return type, got ${ret}`);
     const fname = eat('id').v;
     eat('op', '(');
     const params = [];
@@ -292,7 +293,7 @@ function parse(src) {
     const body = [];
     while (!is('op', '}')) body.push(statement());
     eat('op', '}');
-    fns.push({ fname, params, body });
+    fns.push({ fname, ret, params, body });
   }
   return fns;
 }
@@ -305,6 +306,11 @@ const WIDTH = { float: 1, vec2: 2, vec3: 3, bool: 1, int: 1 };
 const SWZ = { x: 0, y: 1, z: 2, r: 0, g: 1, b: 2 };
 
 function emit(fn, helpers, flatParams) {
+  // The JS side of a translated function returns one number. A vector-returning
+  // one would have to return an array, which is an allocation per call -- so it
+  // is refused here rather than generated badly, and stays hand-written.
+  if (fn.ret && fn.ret !== 'float')
+    throw new Error(`returns ${fn.ret}; only float translates to a JS twin`);
   const lines = [];
   const scope = new Map();
   let tmp = 0;
@@ -431,6 +437,13 @@ function emit(fn, helpers, flatParams) {
       const sp = (v) => wide(v.t) === 1 ? new Array(n).fill(v.p[0]) : v.p;
       const [x, lo, hi] = A.map(sp);
       return val(t, x.map((s, i) => `Math.min(Math.max(${s}, ${lo[i]}), ${hi[i]})`));
+    }
+    if (f === 'mix') {
+      const n = Math.max(...A.map(v => wide(v.t)));
+      const t = n === 1 ? 'float' : n === 2 ? 'vec2' : 'vec3';
+      const sp = (v) => wide(v.t) === 1 ? new Array(n).fill(v.p[0]) : v.p;
+      const [x, y, aa] = A.map(sp);
+      return val(t, x.map((c, i) => `(${c} + (${y[i]} - ${c})*${aa[i]})`));
     }
     if (f === 'atan') {
       if (A.length === 2) return val('float', [`Math.atan2(${A[0].p[0]}, ${A[1].p[0]})`]);
@@ -722,6 +735,22 @@ const mod = { exports: {} };
 new Function('module', readFileSync(join(HERE, 'glsl.js'), 'utf8'))(mod);
 const GL = mod.exports;
 
+// The fold's own functions, translated first so a primitive that calls one
+// finds it. `invRot` is shader-only: its JS twin writes into a caller-supplied
+// array rather than returning one, because sceneSDF calls it once per node per
+// sample. FOLD_TWINS says which of them cross.
+const foldParts = [];
+const foldHelpers = {};
+for (const fn of parse(GL.FOLD)) {
+  if (!GL.FOLD_TWINS.includes(fn.fname)) continue;
+  let o;
+  try { o = emit(fn, foldHelpers, true); }
+  catch (e) { throw new Error(`FOLD/${fn.fname}: ${e.message}`); }
+  foldHelpers[fn.fname] = { arity: o.args.length };
+  foldParts.push(`// ${fn.fname} — from GLSL.FOLD\n`
+    + `function ${fn.fname}(${o.args.join(', ')}) {\n${o.body}\n}`);
+}
+
 const parts = [];
 const helperParts = [];
 const done = [];
@@ -737,7 +766,7 @@ for (const key of GL.KEYS) {
 
   // Anything else in the source is a helper: translated the same way, called
   // with its vector arguments flattened.
-  const helpers = {};
+  const helpers = Object.assign({}, foldHelpers);
   for (const h of fns) {
     if (h === fn || h.fname in INTRINSICS) continue;
     let ho;
@@ -830,6 +859,8 @@ const block = `// --------------------------------------------------------------
 // fails if this block is stale, and check-glsl proves the translation is
 // faithful by running both on the same points.
 // ---------------------------------------------------------------------------
+${foldParts.join('\n')}
+
 ${helperParts.join('\n')}
 const TWINS = {
 ${parts.join('\n')}

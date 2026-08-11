@@ -386,6 +386,41 @@ float pSweep(sweeppath w, vec3 p, vec3 d, float r){
 
 // The whole primitive function library, ready to paste into a fragment
 // shader. Pass a key list to emit a subset.
+// The fold's own functions, which are not primitives but are just as much a
+// definition: `smin` is what a blend *is*, and `invRot` is what a rotation is.
+//
+// These used to be hand-written in three places -- once in JavaScript in the
+// kernel, and once in GLSL in each of the two files that assemble a shader,
+// character for character identical. That is the same duplication the twins no
+// longer have, so it is written here once and everyone reads it from here.
+//
+// `smin` and `smax` are translated into the kernel's generated block like any
+// primitive. `invRot` is not, and deliberately: its JS twin writes into a
+// caller-supplied array rather than returning one, because `sceneSDF` calls it
+// once per node per sample and a returned array would be a hundred million
+// allocations in a single mesh. It stays hand-written on the JS side, and
+// check-glmesh compares the two ends of it per sample on a rotated scene.
+const FOLD = `float smin(float a, float b, float k){
+  if (k <= 0.0) return min(a, b);
+  float h = clamp(0.5 + 0.5*(b - a)/k, 0.0, 1.0);
+  return mix(b, a, h) - k*h*(1.0 - h);
+}
+
+float smax(float a, float b, float k){ return -smin(-a, -b, k); }
+
+vec3 invRot(vec3 p, vec3 e){
+  float c, s; vec3 q = p;
+  c = cos(e.z); s = sin(e.z); q = vec3( c*q.x + s*q.y, -s*q.x + c*q.y, q.z);
+  c = cos(e.y); s = sin(e.y); q = vec3( c*q.x - s*q.z, q.y, s*q.x + c*q.z);
+  c = cos(e.x); s = sin(e.x); q = vec3( q.x, c*q.y + s*q.z, -s*q.y + c*q.z);
+  return q;
+}
+`;
+// Which of them the kernel generates a twin for; the rest are shader-only.
+const FOLD_TWINS = ['smin', 'smax'];
+
+function foldSource() { return FOLD; }
+
 // A `spec` source is the primitive's *definition* -- what build-twins.mjs
 // translates -- and not code any shader runs: `profile`'s names an `outline`
 // type that GLSL does not have, because what the GPU runs is the unrolled
@@ -598,7 +633,6 @@ function maxSlot(plan, t) {
       if (q.t === t) n = Math.max(n, (q.fi | 0) + 1);
   return n;
 }
-const maxProfileSlot = (plan) => maxSlot(plan, 'profile');
 
 function packPlan(at, opts) {
   opts = opts || {};
@@ -622,8 +656,9 @@ function packPlan(at, opts) {
   return uData;
 }
 
-const SinterFormGLSL = { GLSL, library, call, samplerDecls, slotDecls, slotDecl,
-                         sceneBody, mapSource, maxProfileSlot, maxSlot, packPlan,
+const SinterFormGLSL = { GLSL, FOLD, FOLD_TWINS, foldSource,
+                         library, call, samplerDecls, slotDecls, slotDecl,
+                         sceneBody, mapSource, maxSlot, packPlan,
                          KEYS: Object.keys(GLSL) };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterFormGLSL;
 root.SinterFormGLSL = SinterFormGLSL;

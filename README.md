@@ -359,6 +359,31 @@ files, and the copies could drift.
 `library()` skips any source marked `spec`, since a rolled one names an
 `outline`/`polyline` type GLSL does not have.
 
+### The fold
+
+`smin` is what a blend *is* and `invRot` is what a rotation is, so they are
+definitions too, and they live in `glsl.js` as `FOLD`:
+
+| | where it is defined | how it reaches the other side |
+| --- | --- | --- |
+| `smin`, `smax` | `GLSL.FOLD` | generated into the kernel like a primitive |
+| `invRot` | `GLSL.FOLD` | hand-written in JS, deliberately — see below |
+
+Both shader assemblies emit `GL.foldSource()` rather than carrying their own
+copy. Before this there were **five** copies of three functions: one JS each in
+the kernel, and one GLSL each in `viewer.js` and `glmesh.js`, character for
+character identical.
+
+`invRot` is the one exception, and it earns it: the GLSL returns a `vec3`, and
+a JS twin that returned an array would allocate once per node per sample —
+about a hundred million times in a single mesh. It writes into a caller-supplied
+array instead. The generator refuses to translate any non-`float` function
+rather than generating a bad one, so this cannot happen by accident.
+
+Neither is unguarded. `check-glmesh` compares whole *folds* sample-for-sample
+between the JS and the GPU, on scenes that blend and scenes that rotate — a 5%
+perturbation of `smin`'s fillet term alone fails four of its assertions.
+
 `check-kernel` runs the generator in `--check` mode over **both** files and
 names whichever is stale, so neither generated block can be hand-edited.
 

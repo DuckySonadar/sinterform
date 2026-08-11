@@ -58,20 +58,7 @@ uniform vec3 uTint;
 uniform float uHit;
 uniform float uFlat;
 ${GL.samplerDecls(MAXFIELDS)}
-float smin(float a, float b, float k){
-  if (k <= 0.0) return min(a, b);
-  float h = clamp(0.5 + 0.5*(b - a)/k, 0.0, 1.0);
-  return mix(b, a, h) - k*h*(1.0 - h);
-}
-float smax(float a, float b, float k){ return -smin(-a, -b, k); }
-vec3 invRot(vec3 p, vec3 e){
-  float c, s; vec3 q = p;
-  c = cos(e.z); s = sin(e.z); q = vec3( c*q.x + s*q.y, -s*q.x + c*q.y, q.z);
-  c = cos(e.y); s = sin(e.y); q = vec3( c*q.x - s*q.z, q.y, s*q.x + c*q.z);
-  c = cos(e.x); s = sin(e.x); q = vec3( q.x, c*q.y + s*q.z, -s*q.y + c*q.z);
-  return q;
-}
-`;
+${SinterFormGLSL.foldSource()}`;
 
 // The shading half. Deliberately plain: this is a window, not a renderer.
 const TAIL = `

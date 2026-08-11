@@ -346,6 +346,19 @@ function sampleField(f, x, y, z) {
 // fails if this block is stale, and check-glsl proves the translation is
 // faithful by running both on the same points.
 // ---------------------------------------------------------------------------
+// smin — from GLSL.FOLD
+function smin(a, b, k) {
+    if ((k <= 0.0)) {
+      return Math.min(a, b);
+    }
+    let h = Math.min(Math.max((0.5 + ((0.5 * (b - a)) / k)), 0.0), 1.0);
+    return ((b + (a - b)*h) - ((k * h) * (1.0 - h)));
+}
+// smax — from GLSL.FOLD
+function smax(a, b, k) {
+    return (-smin((-a), (-b), k));
+}
+
 // sweepSection — from GLSL.sweep.src
 function sweepSection(kind, sp_0, sp_1, sp_2, u, v) {
     if ((kind < 0.5)) {
@@ -960,16 +973,11 @@ function roundSlot(n) {
   return (n && n.round) || 0;
 }
 
-function smin(a, b, k) {
-  if (k <= 0) return Math.min(a, b);
-  const h = Math.min(Math.max(0.5 + 0.5 * (b - a) / k, 0), 1);
-  return b + (a - b) * h - k * h * (1 - h);
-}
-function smax(a, b, k) {
-  if (k <= 0) return Math.max(a, b);
-  const h = Math.min(Math.max(0.5 - 0.5 * (b - a) / k, 0), 1);
-  return b + (a - b) * h + k * h * (1 - h);
-}
+// smin and smax are generated from GLSL.FOLD, above. invRot is not, and is
+// the one deliberate exception in the file: its GLSL returns a vec3, and a JS
+// twin that returned an array would allocate once per node per sample -- a
+// hundred million times in a single mesh. It writes into `out` instead, and
+// check-glmesh compares the two ends of it per sample on a rotated scene.
 // world -> local: the shape is rotated by Rz*Ry*Rx, so undo it in reverse
 function invRot(x, y, z, e, out) {
   let c = Math.cos(e[2]), s = Math.sin(e[2]);
