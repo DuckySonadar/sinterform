@@ -70,6 +70,11 @@ const INTRINSICS = {
   swCaps: { t: 'vec3', js: ['swf($0,$1,24)', 'swf($0,$1,25)', 'swf($0,$1,26)'] },
   swKind: { t: 'float', js: 'swf($0,$1,27)' },
   swSect: { t: 'vec3', js: ['swf($0,$1,28)', 'swf($0,$1,29)', 'swf($0,$1,30)'] },
+  // `keep` marks an intrinsic that stays a *call* on the GLSL side instead of
+  // becoming unrolled data: the polygon section is a whole 2D sketch, and GLSL
+  // cannot turn a slot number into a function name, so glsl.js emits a small
+  // dispatcher over the profile slots and this calls it.
+  sectionPoly: { t: 'float', keep: true, js: 'sectionPoly($0, $1, $2)' },
   edgeA:       { t: 'vec2',  js: ['edgeAx($0, $1)', 'edgeAy($0, $1)'] },
   edgeB:       { t: 'vec2',  js: ['edgeBx($0, $1)', 'edgeBy($0, $1)'] }
 };
@@ -672,6 +677,7 @@ function unroller(key, fn) {
     if (!(node.f in INTRINSICS)) return null;
     const spec = INTRINSICS[node.f];
     if (spec.t === 'int') return null;              // the count; gone after unrolling
+    if (spec.keep) return null;                     // stays a call in the GLSL
     const tag = `${node.f}(${node.args.map(a => a.n === 'var' ? a.v : '?').join(',')})`;
     if (!seen.has(tag)) {
       const name = node.f.replace(/[^A-Za-z0-9]/g, '').toUpperCase();

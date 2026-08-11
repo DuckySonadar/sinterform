@@ -145,12 +145,13 @@ function mapBody(plan) {
 
 function fragSource(plan) {
   const { body, at } = mapBody(plan);
-  // A profile's outline is compiled into the shader rather than uploaded, so
-  // the source depends on the document's profiles as well as on the plan.
+  // A slotted primitive's data is compiled into the shader rather than
+  // uploaded, so the source depends on the document's outlines, wires and
+  // sweeps as well as on the plan.
   return { src: PREAMBLE + `${GL.library()}\n`
-    + `${GL.slotDecls('profile', slotsOf('profile', SF.profiles), GL.maxSlot(view.plan, 'profile'))}\n`
-    + `${GL.slotDecls('wire', slotsOf('wire', SF.wires), GL.maxSlot(view.plan, 'wire'))}\n`
-    + `${GL.slotDecls('sweep', slotsOf('sweep', SF.sweeps), GL.maxSlot(view.plan, 'sweep'))}\n`
+    + `${GL.slotBlock(view.plan, { profile: slotsOf('profile', SF.profiles),
+                                   wire: slotsOf('wire', SF.wires),
+                                   sweep: slotsOf('sweep', SF.sweeps) })}\n`
     + `float map(vec3 P){\n`
     + `  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n` + TAIL, at };
 }
@@ -431,23 +432,10 @@ void main(){
   };
 }
 
-// A node with every field the kernel reads, so callers can write only what
-// they mean. Handy enough that the viewer would otherwise grow its own.
-// How many profile slots the shader must be able to name. A node may refer to
-// a slot the library has not filled in yet, and an undeclared pProfileN is a
-// compile error rather than an empty shape.
 // The kernel packs a slotted primitive's data; glsl.js turns data into source.
 // The viewer's whole part in it is this line.
 function slotsOf(t, list) {
   return SF.slotList(t, list, GL.maxSlot(view.plan, t));
-}
-
-function maxProfileSlot(plan) {
-  let n = 1;
-  for (const body of plan || [])
-    for (const q of body.nodes || [])
-      if (q.t === 'profile') n = Math.max(n, (q.fi | 0) + 1);
-  return n;
 }
 
 function node(t, over) {

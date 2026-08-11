@@ -30,7 +30,7 @@ const TOL = 2e-3;          // mm; fp32 in the shader against fp64 in node
 // orders under the finest thing this prints, and not a formula difference.
 // Anything using sin/cos/atan gets the looser bar; everything else stays
 // tight, because a real drift between the twins would be far larger.
-const LOOSE = { prism: 3e-2, sweep: 3e-2 };
+const LOOSE = { prism: 3e-2, sweep: 3e-2, sweepPoly: 3e-2 };
 const N = 64;              // N*N points per primitive
 
 const mod = { exports: {} };
@@ -186,19 +186,51 @@ const cases = KEYS.map(k => {
     const t = i / 18 * Math.PI * 1.3;
     path.push([20 * Math.cos(t), 20 * Math.sin(t), 6 * Math.sin(2 * t)]);
   }
-  const packed = SW.pack(path, { kind: 'rect', a: 8, b: 4, c: 1 },
-                         { scale: (t) => 1 + 0.8 * t, twist: 1.1 });
-  SF.sweeps = [packed.sweep];
-  const d = packed.node.d;
-  const pts = new Float32Array(N * N * 4);
-  for (let i = 0; i < N * N; i++) {
-    pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.4;
-    pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.4;
-    pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 1.6;
+  // A drawn section as well as a built-in one. The outline goes in profile
+  // slot 1, not slot 0, so the dispatch `sectionPolyDecl` writes has two arms
+  // and picking the wrong one is visible -- slot 0 is the cross, which no
+  // amount of tolerance makes look like a tee.
+  const tee = [[[-6, -3], [6, -3], [6, 1], [2, 1], [2, 7], [-2, 7], [-2, 1], [-6, 1]]];
+  SF.profiles = [SF.profiles[0], { name: 'test tee', loops: tee }];
+  let radius = 0;
+  for (const l of tee) for (const p of l) radius = Math.max(radius, Math.hypot(p[0], p[1]));
+  const sectionFn = (u, v) => SF.polygonSDF(tee, u, v);
+  sectionFn.radius = radius;
+
+  for (const [key, section, name] of [
+    ['sweep', { kind: 'rect', a: 8, b: 4, c: 1 }, SF.PRIMS.sweep.name],
+    ['sweepPoly', { kind: 'polygon', a: 1, fn: sectionFn }, 'Sweep (drawn section)']
+  ]) {
+    const packed = SW.pack(path, section,
+                           { scale: (t) => 1 + 0.8 * t, twist: 1.1 });
+    SF.sweeps = [packed.sweep];
+    const d = packed.node.d;
+    const pts = new Float32Array(N * N * 4);
+    for (let i = 0; i < N * N; i++) {
+      pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.4;
+      pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.4;
+      pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 1.6;
+    }
+    // Not this file's own arrangement of declarations but `slotBlock`'s -- the
+    // one the kernel's mapSource and the viewer both take. A drawn section is
+    // a call from one unrolled primitive into another, so the order they come
+    // out in is part of what has to be right, and the viewer cannot say so: a
+    // sweep raymarched on a software rasteriser outlasts any timeout worth
+    // setting. Compiling it here is where that gets checked.
+    const plan = [{ id: 0, nodes: [packed.node] }];
+    cases.push({ key, fn: 'pSweep0',
+                 glsl: GL.slotBlock(plan, {
+                   profile: SF.slotList('profile', SF.profiles, 2),
+                   sweep: [SF.slotItems('sweep', SF.sweeps[0])]
+                 }),
+                 name, d, r: 0, slotted: true, pts,
+                 // Two sweeps, one slot: the JS side is compared long after
+                 // this loop, so each case puts its own back before it runs.
+                 js: (p, dd, r) => {
+                   SF.sweeps = [packed.sweep];
+                   return SF.PRIMS.sweep.js(p, dd, r, { fi: 0 });
+                 } });
   }
-  cases.push({ key: 'sweep', fn: 'pSweep0',
-               glsl: GL.slotDecls('sweep', [SF.slotItems('sweep', SF.sweeps[0])], 1),
-               name: SF.PRIMS.sweep.name, d, r: 0, slotted: true, pts });
 }
 
 // And `field`, which until now was the only primitive with no per-point check

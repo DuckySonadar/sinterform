@@ -1019,6 +1019,16 @@ console.log('\n--- and as a kernel primitive ---');
     loop.push([25 * Math.cos(t), 25 * Math.sin(t), 4 * Math.sin(2 * t)]);
   }
 
+  // A drawn section: the outline lives in a profile slot like any other 2D
+  // sketch, and the kernel reads it there. Slot 1, behind a decoy, because
+  // `sectionPoly` dispatches on a number and a sweep that ignored it would
+  // still draw a plausible solid -- the wrong one.
+  const tee = [[[-6, -3], [6, -3], [6, 1], [2, 1], [2, 7], [-2, 7], [-2, 1], [-6, 1]]];
+  SF.profiles = [{ name: 'decoy', loops: [[[-8, -8], [8, -8], [8, 8], [-8, 8]]] },
+                 { name: 'tee', loops: tee }];
+  const teeFn = (u, v) => SF.polygonSDF(tee, u, v);
+  teeFn.radius = Math.hypot(6, 7);
+
   const cases = [
     ['circle, flat', flat, { kind: 'circle', a: 4 }, {}],
     ['circle, through space', space, { kind: 'circle', a: 4 }, {}],
@@ -1029,7 +1039,10 @@ console.log('\n--- and as a kernel primitive ---');
     ['twisted rect', space, { kind: 'rect', a: 9, b: 3 }, { twist: Math.PI }],
     ['twist and taper', space, { kind: 'rect', a: 8, b: 3 }, { twist: 2, scale: (t) => 1 + t }],
     ['closed loop', loop, { kind: 'circle', a: 3.5 }, { closed: true }],
-    ['miter join', flat, { kind: 'rect', a: 7, b: 3 }, { join: 'miter' }]
+    ['miter join', flat, { kind: 'rect', a: 7, b: 3 }, { join: 'miter' }],
+    ['drawn section', space, { kind: 'polygon', a: 1, fn: teeFn }, {}],
+    ['drawn section, twisted and tapered', space,
+     { kind: 'polygon', a: 1, fn: teeFn }, { twist: 1.7, scale: (t) => 1 + t }]
   ];
 
   let sd = 0x5bf03635;
@@ -1059,6 +1072,33 @@ console.log('\n--- and as a kernel primitive ---');
   try { SW.pack(flat, (u, v) => Math.hypot(u, v) - 3, {}); }
   catch (e) { threw = e; }
   ok(threw, 'and a caller-supplied section function is refused, not silently wrong');
+
+  // A drawn section is the one kind that needs a function too -- to mesh, and
+  // for its bounds. Without it the slot alone would pack, and the CPU half
+  // would be a sweep of nothing.
+  let threwPoly = null;
+  try { SW.pack(flat, { kind: 'polygon', a: 1 }, {}); }
+  catch (e) { threwPoly = e; }
+  ok(threwPoly, 'and a polygon section with no outline function is refused too');
+
+  // The slot really is read: the same path and the same everything, pointed at
+  // the decoy instead, is a different solid.
+  {
+    const a = SW.pack(space, { kind: 'polygon', a: 1, fn: teeFn }, {});
+    SF.sweeps = [a.sweep];
+    const planA = [{ id: 0, nodes: [a.node] }];
+    const b = SW.pack(space, { kind: 'polygon', a: 0, fn: teeFn }, {});
+    let differs = 0;
+    for (let i = 0; i < 4000; i++) {
+      const p = [(q() * 2 - 1) * 45, (q() * 2 - 1) * 45, (q() * 2 - 1) * 25];
+      SF.sweeps = [b.sweep];
+      const db = SF.sceneSDF([{ id: 0, nodes: [b.node] }], ...p);
+      SF.sweeps = [a.sweep];
+      if (Math.abs(SF.sceneSDF(planA, ...p) - db) > 1e-9) differs++;
+    }
+    ok(differs > 100, `and the section's slot number selects the outline `
+      + `(${differs}/4000 samples differ against a decoy in slot 0)`);
+  }
 }
 
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);

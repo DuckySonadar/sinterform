@@ -81,9 +81,13 @@ is the solver's answer rather than a shape typed in to look like one.
 
 Neither is baked. A sketch extrude reaches the GPU as a `profile` — the
 outline compiled straight into the shader source, so both halves walk the same
-edges. What still needs baking is the shape with no formula at all: **twisted
-box — baked field** is a domain warp sampled onto a grid, and it is the only
-scene here that exercises a `field` on either side.
+edges. **sweep, a drawn section** is the same outline used the other way: a tee
+drawn and solved in the 2D sketcher, then dragged along a curve through space
+rather than extruded up. Same slot, same `polygonSDF`, different push.
+
+What still needs baking is the shape with no formula at all: **twisted box —
+baked field** is a domain warp sampled onto a grid, and it is the only scene
+here that exercises a `field` on either side.
 
 ## Conventions
 
@@ -460,12 +464,40 @@ caller-supplied `(u, v) → mm` function still works in `along()` and still mesh
 — it just cannot cross into a shader, and `pack()` refuses it rather than
 drawing something else.
 
+**Or the section is drawn.** A cross-section is a 2D shape, and the repository
+already has 2D shapes — so `kind: 'polygon'` is not a fourth kind of section, it
+is a `profile` slot: the same outline the `profile` primitive extrudes, read by
+the same `polygonSDF`, drawn and solved by the same sketcher. `a` is the slot
+number.
+
+```js
+const { profile, section } = S.section();     // S is a Sketch
+SinterForm.profiles = [profile];
+const { sweep, node } = SinterSweep.pack(path, section, { twist: 1.4 });
+```
+
+Two halves come back because they go to two places: the outline onto the
+document, where the kernel and the shader both read it by slot, and the section
+into `pack()`, which needs the slot number and — for bounds and for meshing on
+the CPU — the outline's own distance function. That function is `sketch.js`'s,
+not a third copy in `sweep.js`.
+
+In the shader it is one unrolled primitive calling another. GLSL cannot build a
+function name from a number, so `sectionPolyDecl` writes a dispatch over the
+slots the plan named — three or four lines the compiler folds away, since the
+slot arrives as a literal. And a profile extruded with a half-thickness of 1e9
+*is* its own 2D distance (the slab term never wins, so
+`min(max(da, db), 0) + length(…)` collapses to `da`), which is why a drawn
+section needs no evaluator of its own. `slotBlock` emits profiles, then the
+dispatch, then everything else — the one order that compiles, written once and
+used by both `mapSource` and the viewer.
+
 The kernel's `sweep` primitive is a direct transcription of `along()`'s
-evaluator, and `check-sweep` holds the two **bit-for-bit** across ten
+evaluator, and `check-sweep` holds the two **bit-for-bit** across twelve
 configurations — flat, through space, tapered, twisted, closed, mitered, all
-three sections. Not "close": the GLSL was transcribed from that evaluator and
-the JS twin generated from the GLSL, so anything but exact means a step of that
-chain lost something.
+three built-in sections and a drawn one. Not "close": the GLSL was transcribed
+from that evaluator and the JS twin generated from the GLSL, so anything but
+exact means a step of that chain lost something.
 
 ### Wires
 
@@ -614,7 +646,7 @@ constraints, the solve report, reading and editing, serialisation, and the two
 characteristics worth knowing about before relying on it.
 
 ```
-node check-sketch.mjs      # 110 assertions
+node check-sketch.mjs      # 144 assertions
 ```
 
 ## Sketches in space (`sketch3d.js`)
@@ -703,9 +735,9 @@ three — and reaches a loop as `{ loop: i }` from a 2D sketch or `{ face: i }`
 / `{ face: i, loop: j }` from a 3D one.
 
 A profile is any `(u, v) → mm`, with `u` across the path and `v` up;
-`PROFILES.circle`, `.rect` and `.halfCircle` cover the usual ones. `scale`
-takes a number, a function of arc length in `[0, 1]`, or one factor per path
-point.
+`PROFILES.circle`, `.rect` and `.halfCircle` cover the usual ones, and
+`Sketch.prototype.section` makes one out of a drawing. `scale` takes a number, a
+function of arc length in `[0, 1]`, or one factor per path point.
 
 ### A path through space: the frame is carried, not computed
 
@@ -833,7 +865,7 @@ to no material lost or invented, and no more than 0.05 mm reported past the
 truth on the outside.
 
 ```
-node check-sweep.mjs      # 105 assertions
+node check-sweep.mjs      # 110 assertions
 ```
 
 ## Inlining it into HTML
@@ -895,7 +927,17 @@ to half a cell inside the true one and its edges are faceted, so the outlines
 are close rather than identical.
 
 It also catches the ordinary breakages: a shader that stopped compiling, a
-module that stopped attaching to its global.
+module that stopped attaching to its global. And it builds *every* scene's plan,
+including the two it cannot draw — a scene is a page of kernel API used the way
+a caller would use it, so building one is worth checking even when nothing is
+rendered.
+
+The two sweep scenes are the ones it cannot draw. A slotted primitive costs
+O(items) per sample and a sweep's item is the heaviest of them, so under the
+software rasteriser CI has, one frame outlasts any timeout worth setting. Their
+geometry is checked harder elsewhere: `check-glsl` compiles the same assembled
+block the viewer gets and compares it to the JS twin per point, and `check-sweep`
+holds that twin bit-for-bit against the closure the segments were packed from.
 
 ### `check-glsl.mjs` — do the GLSL and JS twins agree?
 
@@ -907,6 +949,12 @@ node check-glsl.mjs --require  # what CI should run
 Compiles the real GLSL on a real GPU, evaluates every primitive at 4096
 points, and compares against the JS at the same points. First it checks the
 two files describe the same set of primitives at all.
+
+The slotted ones get their data compiled in, so they are checked with real data
+rather than a default: a solved outline, a tapered wire, and a sweep both ways —
+once with a built-in section and once with a section drawn in the sketcher,
+which is a shader function calling into another shader function and so is
+assembled by `slotBlock` here exactly as the viewer assembles it.
 
 This matters more since the split than it did before: the twins no longer sit
 next to each other, so nothing but this notices when they drift.

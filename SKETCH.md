@@ -419,6 +419,38 @@ node moved to match, so the primitive's bounds are tight.
 The test suite checks `shape()` against the five-line extrusion above at
 twenty thousand points; they agree to 4e-15 mm.
 
+### `section([opts]) → { profile, section }`
+
+The same drawing pushed along a path instead of straight up. A sweep's
+cross-section is a 2D shape, so it is *this* 2D shape — no second
+representation, no second distance function: the outline goes into a `profile`
+slot like any other, and `sweep.js` names the slot.
+
+```js
+const { profile, section } = S.section();
+SinterForm.profiles = [profile];
+const { sweep, node } = SinterSweep.pack(path, section, { twist: 1.4 });
+SinterForm.sweeps = [sweep];
+```
+
+Two halves, because they go to two places: `profile` onto the document, where
+the kernel and the shader both read it by slot, and `section` into `pack()`,
+which needs the slot number and — for bounds and for meshing on the CPU — the
+outline's own `(u, v) → mm`. That function is this file's `polygonSDF`, handed
+over rather than reimplemented in `sweep.js`.
+
+`opts` takes `tol`, `name`, `fi` (the profile slot) and `centre`. The loops are
+centred on their bounding box by default, so the path runs up the middle of the
+section; `centre: false` keeps them where they were drawn, which is what a bead
+laid on a surface wants — draw it sitting on the *u* axis and it sweeps sitting
+on the path. `section.radius` is how far the section reaches from the path,
+taken from the furthest vertex, which is exact and does not assume the section
+contains the origin.
+
+The test suite sweeps a solved sketch down a straight run and checks, at
+fourteen thousand points halfway along it, that the 3D distance is the 2D one:
+exact, 0.00e+0 mm.
+
 ## Serialisation
 
 ### `toJSON() → object` · `Sketch.fromJSON(obj) → Sketch`

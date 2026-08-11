@@ -611,19 +611,34 @@ const pad = (p) => (p.length > 2 ? p : [p[0], p[1], 0]);
 // do: `kind` 0 circle, 1 rect, 2 halfCircle, with up to three parameters. A
 // caller-supplied function still works in `along()` and still meshes, it just
 // cannot cross into a shader.
-const SECTION_KINDS = { circle: 0, rect: 1, halfCircle: 2 };
+//
+// Except by being drawn. `kind` 3 is a *sketch*: `a` is a profile slot, and
+// the outline in it is the same one the `profile` primitive extrudes, read by
+// the same polygonSDF. A section is a 2D shape and the repository already had
+// 2D shapes; this is that one, not a second kind of drawing.
+//
+// The 2D distance itself arrives as `section.fn`, because that function
+// belongs to whoever owns the outline -- sketch.js and the kernel each have a
+// polygonSDF, and a third copy here would be a third thing to keep in step.
+// Sketch.prototype.section hands back both halves already paired up. Only
+// along() calls it; the slot is what crosses into a shader.
+const SECTION_KINDS = { circle: 0, rect: 1, halfCircle: 2, polygon: 3 };
 const STRIDE = 31;
 
 function pack(path, section, opts) {
   const kind = SECTION_KINDS[section && section.kind];
   if (kind === undefined)
-    throw new Error(`sweep.pack wants a section {kind: 'circle'|'rect'|'halfCircle'}`);
-  const a = section.a === undefined ? 1 : section.a;
+    throw new Error("sweep.pack wants a section {kind: 'circle'|'rect'|'halfCircle'|'polygon'}");
+  if (kind === 3 && typeof section.fn !== 'function')
+    throw new Error('a polygon section wants section.fn, the outline\'s own 2D '
+                  + 'distance -- Sketch.prototype.section returns it with the slot');
+  const a = section.a === undefined ? (kind === 3 ? 0 : 1) : section.a;
   const b = section.b === undefined ? 0 : section.b;
   const c = section.c === undefined ? 0 : section.c;
   const profile = kind === 0 ? PROFILES.circle(a)
                 : kind === 1 ? PROFILES.rect(a, b, c)
-                :              PROFILES.halfCircle(a);
+                : kind === 2 ? PROFILES.halfCircle(a)
+                :              section.fn;
   const f = along(path, profile, opts);
   const S = f.seg;
   const segs = new Float64Array(S.length * STRIDE);

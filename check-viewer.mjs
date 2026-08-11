@@ -61,13 +61,19 @@ const SCENES = ['every primitive', 'booleans', 'two bodies, no blend across',
                 'sketch 2D, extruded', 'sketch 3D, extruded',
                 // one node, N round cones, blended into a block
                 'wire, tapered and blended'];
-// `sweep, tapered and twisted` is in the viewer but deliberately not here. A
+// The two sweep scenes are deliberately not in that list, and cannot be: a
 // slotted primitive costs O(items) per sample and a sweep's item is the
-// heaviest of them, so meshing that scene under a software rasteriser takes
-// tens of seconds -- long enough that the screenshot races the mesh. It is not
-// unchecked: check-glsl compares its unrolled shader against the JS twin per
-// point, and check-sweep holds the JS twin bit-for-bit against the closure the
-// segments were packed from, which is a stronger statement than a silhouette.
+// heaviest of them, so under a software rasteriser one frame outlasts the
+// screenshot's own timeout -- the page stops answering long before it draws.
+// It is not that they are slow to check, it is that they cannot be checked
+// here at all.
+//
+// They are checked, elsewhere and harder. check-glsl compiles the same
+// assembled block slotBlock hands the viewer -- profiles, the section
+// dispatcher, then the sweep -- and compares it against the JS twin per point;
+// check-sweep holds that twin bit-for-bit against the closure the segments
+// were packed from. Between them that is the shader source, its compile and
+// its geometry, which is more than a silhouette says.
 const RES = 0.9;
 
 const browser = await chromium.launch({
@@ -88,6 +94,34 @@ ok(errors.length === 0, `the page loads clean${errors.length ? ' — ' + errors.
 ok(await page.evaluate('!!(window.SinterForm && window.SinterFormGLSL && window.SinterView)'),
    'all three modules attached to their globals');
 ok(!(await page.textContent('#err')).trim(), 'no shader or mesh error reported');
+
+// Every scene builds a plan, including the two that cannot be drawn here. A
+// scene is a page of kernel API used the way a caller would use it -- solve a
+// sketch, pack a sweep, name a slot -- so building one exercises that even
+// when nothing is rendered.
+{
+  const built = await page.evaluate(() => {
+    const out = {};
+    for (const [name, fn] of Object.entries(window.__SCENES)) {
+      try {
+        const plan = fn();
+        out[name] = Array.isArray(plan) && plan.length
+          && plan.every(b => Array.isArray(b.nodes) && b.nodes.length) ? 'ok' : 'empty plan';
+      } catch (e) { out[name] = String(e.message || e); }
+    }
+    return out;
+  });
+  const bad = Object.entries(built).filter(([, v]) => v !== 'ok');
+  ok(bad.length === 0, `all ${Object.keys(built).length} scenes build a plan`
+    + (bad.length ? ` — ${bad.map(([k, v]) => `${k}: ${v}`).join(' | ')}` : ''));
+  // Building them all left the document holding whichever ran last -- and a
+  // stale sweep in a slot is still unrolled into every shader after it, which
+  // on this rasteriser is the difference between compiling and hanging. The
+  // scene switches below each refill what they need.
+  await page.evaluate(() => {
+    SinterForm.profiles = []; SinterForm.wires = []; SinterForm.sweeps = [];
+  });
+}
 
 // Turn a canvas screenshot into a silhouette mask, in the page, where there is
 // an image decoder.

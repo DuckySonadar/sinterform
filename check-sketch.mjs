@@ -877,6 +877,70 @@ console.log('\n--- and the whole way through to a solid ---');
   ok(bb && [0, 1, 2].every(i => bb.lo[i] <= lo[i] + pad + 1e-9
                              && bb.hi[i] >= hi[i] - pad - 1e-9),
      `and its bounds contain it without being told where it is`);
+
+  // ---- and the same drawing as a sweep's section ------------------------
+  // A sweep's cross-section is a 2D shape, so it is *this* 2D shape: the same
+  // sketch, the same loops, the same profile slot the extrude above used. What
+  // changes is only which way it is pushed -- straight up for a shape, along a
+  // path for a section.
+  const w = { exports: {} };
+  new Function('module', readFileSync(join(HERE, 'sweep.js'), 'utf8'))(w);
+  const SW = w.exports;
+
+  const sec = S.section({ tol: 0.001 });
+  ok(sec.section.kind === 'polygon' && sec.section.a === 0
+     && typeof sec.section.fn === 'function',
+     'section() hands back a polygon section naming a profile slot');
+  // Centred by default, so the path runs up the middle of it rather than
+  // wherever the sketch was drawn.
+  let sx0 = Infinity, sx1 = -Infinity;
+  for (const l of sec.profile.loops) for (const p of l) {
+    sx0 = Math.min(sx0, p[0]); sx1 = Math.max(sx1, p[0]);
+  }
+  ok(Math.abs(sx0 + sx1) < 1e-9, 'and centres the loops on the path by default');
+  ok(sec.section.fn(0, 0) < 0, 'so the path itself runs inside the section');
+  ok(Math.abs(sec.section.radius - Math.max(...sec.profile.loops.flat()
+       .map(p => Math.hypot(p[0], p[1])))) < 1e-9,
+     'and reports the reach a vertex actually has, not one measured outwards');
+
+  // Straight down +X for a length, which makes the swept solid the same
+  // extrusion as above -- turned on its side. Checking it *is* that solid,
+  // against the sweep's own evaluator through the kernel, is what says the
+  // slot arrived and the outline was read.
+  const path = [[-20, 0, 0], [20, 0, 0]];
+  const packed = SW.pack(path, sec.section, {});
+  SF.profiles = [sec.profile];
+  SF.sweeps = [packed.sweep];
+  const splan = [{ id: 0, nodes: [packed.node] }];
+  let swWorst = 0;
+  for (let i = 0; i < 20000; i++) {
+    const p = [-30 + 60 * rnd(), -40 + 80 * rnd(), -40 + 80 * rnd()];
+    swWorst = Math.max(swWorst, Math.abs(packed.f(...p) - SF.sceneSDF(splan, ...p)));
+  }
+  ok(swWorst === 0, `and sweeps as the kernel's own primitive, exactly`
+    + (swWorst ? ` — worst ${swWorst.toExponential(2)} mm` : ''));
+
+  // And the solid really is the drawing pushed along. Halfway down a straight
+  // run the nearest surface is the section's own wall, not either cap, so the
+  // 3D distance there *is* the 2D distance the sketch reports -- read in the
+  // segment's own frame rather than a guessed one, so this checks the outline
+  // arrived and not which way U happened to point.
+  const g = sec.section.fn, sg = packed.sweep.segs;
+  const sA = [sg[0], sg[1], sg[2]], sT = [sg[3], sg[4], sg[5]];
+  const sU = [sg[6], sg[7], sg[8]], sV = [sg[9], sg[10], sg[11]];
+  const half = sg[16] / 2;
+  let secWorst = 0, tried = 0;
+  for (let i = 0; i < 20000; i++) {
+    const u = -40 + 80 * rnd(), v = -30 + 60 * rnd();
+    const d2 = g(u, v);
+    if (Math.abs(d2) > half - 5) continue;   // near a cap the cap can win
+    tried++;
+    const p = [0, 1, 2].map(k => sA[k] + half * sT[k] + u * sU[k] + v * sV[k]);
+    secWorst = Math.max(secWorst, Math.abs(packed.f(...p) - d2));
+  }
+  ok(tried > 1000 && secWorst < 1e-9,
+     `and halfway along it the solid is exactly the drawing `
+     + `(${tried} points, worst ${secWorst.toExponential(2)} mm)`);
 }
 
 console.log(`\n${fail ? `${fail} FAILURE(S)` : 'all good'}`);

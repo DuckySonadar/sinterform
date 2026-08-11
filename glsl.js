@@ -275,7 +275,10 @@ float pFieldS(sampler3D s, vec3 p, vec3 d, float r){
     float qu = abs(u) - hw, qv = abs(v) - hh;
     return length(max(vec2(qu, qv), 0.0)) + min(max(qu, qv), 0.0) - sp.z;
   }
-  return max(length(vec2(u, v)) - sp.x, -v);
+  if (kind < 2.5) return max(length(vec2(u, v)) - sp.x, -v);
+  // A drawn 2D sketch, by profile slot: the same outlines the profile
+  // primitive extrudes, and the same polygonSDF the kernel evaluates.
+  return sectionPoly(sp.x, u, v);
 }
 
 float pSweep(sweeppath w, vec3 p, vec3 d, float r){
@@ -421,6 +424,42 @@ const FOLD_TWINS = ['smin', 'smax'];
 
 function foldSource() { return FOLD; }
 
+// The bridge from a sweep's polygon section to the profile slot that holds it.
+// GLSL has no function pointers and cannot build a name from a float, so this
+// is a dispatch over however many slots the plan named -- three or four lines,
+// and the compiler folds it away because the slot arrives as a literal.
+//
+// A profile extruded with a half-thickness of 1e9 is exactly its own 2D
+// distance: the slab term never wins, so min(max(da, db), 0) + length(...)
+// collapses to da. That is why a section needs no separate evaluator.
+function sectionPolyDecl(count) {
+  const n = Math.max(count | 0, 1);
+  let s = 'float sectionPoly(float slot, float u, float v){\n';
+  for (let i = 0; i < n - 1; i++)
+    s += `  if (slot < ${i}.5) return pProfile${i}(vec3(u, v, 0.0), vec3(0.0, 0.0, 1e9));\n`;
+  s += `  return pProfile${n - 1}(vec3(u, v, 0.0), vec3(0.0, 0.0, 1e9));\n}\n`;
+  return s;
+}
+
+// Every slotted primitive's declarations, in the one order that compiles:
+// profiles first, then the section dispatcher, then everything else -- because
+// a sweep with a drawn section calls into the profiles and GLSL wants a
+// function declared before it is used. `slots` is
+// { profile: [items], wire: [...], sweep: [...] } from SinterForm.slotList.
+//
+// Both consumers get their block from here. The viewer packs its uniforms
+// differently and writes its own map(), but the unrolling is the kernel's --
+// written once per primitive, and called.
+function slotBlock(plan, slots) {
+  slots = slots || {};
+  const nProfile = Math.max(maxSlot(plan, 'profile'),
+                            (slots.profile || []).length, 1);
+  return slotDecls('profile', slots.profile || [], nProfile) + '\n'
+    + sectionPolyDecl(nProfile) + '\n'
+    + Object.keys(UNROLL).filter(k => k !== 'profile')
+        .map(k => slotDecls(k, slots[k] || [], maxSlot(plan, k))).join('\n');
+}
+
 // A `spec` source is the primitive's *definition* -- what build-twins.mjs
 // translates -- and not code any shader runs: `profile`'s names an `outline`
 // type that GLSL does not have, because what the GPU runs is the unrolled
@@ -495,7 +534,7 @@ const UNROLL = {
   },
   sweep: {
     fn: "pSweep", stride: 31, arity: [3, 3, 3, 3, 2, 2, 3, 2, 3, 3, 1, 3],
-    helpers: "float sweepSection(float kind, vec3 sp, float u, float v){\n  if ((kind < 0.5)) {\n    return (length(vec2(u, v)) - sp.x);\n  }\n  if ((kind < 1.5)) {\n    float hw = max(((sp.x * 0.5) - sp.z), 0.0);\n    float hh = max(((sp.y * 0.5) - sp.z), 0.0);\n    float qu = (abs(u) - hw);\n    float qv = (abs(v) - hh);\n    return ((length(max(vec2(qu, qv), 0.0)) + min(max(qu, qv), 0.0)) - sp.z);\n  }\n  return max((length(vec2(u, v)) - sp.x), (-v));\n}\n",
+    helpers: "float sweepSection(float kind, vec3 sp, float u, float v){\n  if ((kind < 0.5)) {\n    return (length(vec2(u, v)) - sp.x);\n  }\n  if ((kind < 1.5)) {\n    float hw = max(((sp.x * 0.5) - sp.z), 0.0);\n    float hh = max(((sp.y * 0.5) - sp.z), 0.0);\n    float qu = (abs(u) - hw);\n    float qv = (abs(v) - hh);\n    return ((length(max(vec2(qu, qv), 0.0)) + min(max(qu, qv), 0.0)) - sp.z);\n  }\n  if ((kind < 2.5)) {\n    return max((length(vec2(u, v)) - sp.x), (-v));\n  }\n  return sectionPoly(sp.x, u, v);\n}\n",
     pre: "  float best = 1e18;",
     macro: "#define ITEM(SWA, SWT, SWU, SWV, SWK, SWTURN, SWLS, SWE, SWMISC, SWCAPS, SWKIND, SWSECT) {\\\n  vec3 A = SWA; \\\n  vec3 T = SWT; \\\n  vec3 U = SWU; \\\n  vec3 V = SWV; \\\n  vec2 K = SWK; \\\n  vec2 TC = SWTURN; \\\n  vec3 LS = SWLS; \\\n  vec2 E = SWE; \\\n  vec3 M = SWMISC; \\\n  vec3 C = SWCAPS; \\\n  float kind = SWKIND; \\\n  vec3 sp = SWSECT; \\\n  vec3 pa = (p - A); \\\n  float proj = dot(pa, T); \\\n  float t = ((proj < 0.0) ? 0.0 : ((proj > LS.x) ? 1.0 : (proj / LS.x))); \\\n  float oStart = (-(proj + E.x)); \\\n  float oEnd = (proj - (LS.x + E.y)); \\\n  bool atA = (oStart > oEnd); \\\n  float past = (atA ? oStart : oEnd); \\\n  float capped = max(((C.x > 0.5) ? oStart : (-1e30)), ((C.y > 0.5) ? oEnd : (-1e30))); \\\n  float s = (LS.y + ((LS.z - LS.y) * t)); \\\n  float u0 = dot(pa, U); \\\n  float v0 = dot(pa, V); \\\n  float u = u0; \\\n  float v = v0; \\\n  if ((M.x != 0.0)) { \\\n    float a = (M.x * t); \\\n    float ca = cos(a); \\\n    float sa = sin(a); \\\n    u = ((u0 * ca) + (v0 * sa)); \\\n    v = ((v0 * ca) - (u0 * sa)); \\\n  } \\\n  float d2 = ((s > 1e-9) ? (sweepSection(kind, sp, (u / s), (v / s)) * s) : length(vec2(u, v))); \\\n  float raw; \\\n  if ((past > 0.0)) { \\\n    raw = ((d2 <= 0.0) ? past : length(vec2(d2, past))); \\\n  } else { \\\n    raw = max(d2, capped); \\\n  } \\\n  best = min(best, (raw / M.y)); \\\n  if ((C.z > 0.5)) { \\\n    float oJ = (proj - LS.x); \\\n    if (((length(vec3(u0, v0, oJ)) - M.z) < (best * M.y))) { \\\n      float uj = u0; \\\n      float vj = v0; \\\n      if ((M.x != 0.0)) { \\\n        float ca = cos(M.x); \\\n        float sa = sin(M.x); \\\n        uj = ((u0 * ca) + (v0 * sa)); \\\n        vj = ((v0 * ca) - (u0 * sa)); \\\n      } \\\n      float sJ = LS.z; \\\n      float pk = ((uj * K.x) + (vj * K.y)); \\\n      float pm = ((vj * K.x) - (uj * K.y)); \\\n      float beta; \\\n      float off; \\\n      if ((oJ < 0.0)) { \\\n        beta = pm; \\\n        off = oJ; \\\n      } else { \\\n        if ((((pm * TC.y) - (oJ * TC.x)) >= 0.0)) { \\\n          beta = length(vec2(pm, oJ)); \\\n          off = 0.0; \\\n        } else { \\\n          beta = ((pm * TC.x) + (oJ * TC.y)); \\\n          off = ((oJ * TC.x) - (pm * TC.y)); \\\n        } \\\n      } \\\n      float p2 = (sweepSection(kind, sp, (((pk * K.x) - (beta * K.y)) / sJ), (((pk * K.y) + (beta * K.x)) / sJ)) * sJ); \\\n      float c = (((off == 0.0) ? p2 : length(vec2(max(p2, 0.0), abs(off)))) / M.y); \\\n      best = min(best, c); \\\n    } \\\n  } }\n",
     post: "  return best;"
@@ -617,8 +656,7 @@ function mapSource(plan, profiles, opts) {
   // source, and neither has an opinion about the other's half.
   const slots = (opts && opts.slots) || {};
   const src = `${library()}\n`
-    + Object.keys(UNROLL).map(k =>
-        slotDecls(k, slots[k] || [], maxSlot(plan, k))).join('\n') + '\n'
+    + slotBlock(plan, slots) + '\n'
     + `float map(vec3 P){\n  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n`;
   return { src, at };
 }
@@ -656,8 +694,8 @@ function packPlan(at, opts) {
   return uData;
 }
 
-const SinterFormGLSL = { GLSL, FOLD, FOLD_TWINS, foldSource,
-                         library, call, samplerDecls, slotDecls, slotDecl,
+const SinterFormGLSL = { GLSL, FOLD, FOLD_TWINS, foldSource, sectionPolyDecl,
+                         library, call, samplerDecls, slotBlock, slotDecls, slotDecl,
                          sceneBody, mapSource, maxSlot, packPlan,
                          KEYS: Object.keys(GLSL) };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterFormGLSL;

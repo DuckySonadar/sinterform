@@ -196,6 +196,16 @@ function sweepSegs(w) {
 function swCount(w) { return Math.floor(sweepSegs(w).length / SWEEP_STRIDE); }
 function swf(w, i, k) { return sweepSegs(w)[SWEEP_STRIDE * i + k]; }
 
+// The JS half of the sweep's polygon-section hook: a slot number and a point
+// in the section plane. Same outlines, same polygonSDF, same default -- a
+// sweep's section is a 2D sketch and nothing else.
+function sectionPoly(slot, u, v) {
+  const pr = profiles[Math.max(slot | 0, 0)];
+  const loops = (pr && pr.loops && pr.loops.some(l => l && l.length >= 3))
+    ? pr.loops : DEFAULT_OUTLINE;
+  return polygonSDF(loops, u, v);
+}
+
 function slotItems(t, obj) {
   if (t === 'wire') return wireSegments(obj);
   if (t === 'profile') return outlineEdges(obj);
@@ -371,7 +381,10 @@ function sweepSection(kind, sp_0, sp_1, sp_2, u, v) {
       let qv = (Math.abs(v) - hh);
       return ((Math.hypot(Math.max(qu, 0.0), Math.max(qv, 0.0)) + Math.min(Math.max(qu, qv), 0.0)) - sp_2);
     }
-    return Math.max((Math.hypot(u, v) - sp_0), (-v));
+    if ((kind < 2.5)) {
+      return Math.max((Math.hypot(u, v) - sp_0), (-v));
+    }
+    return sectionPoly(sp_0, u, v);
 }
 const TWINS = {
   // pSphere — from GLSL.sphere.src

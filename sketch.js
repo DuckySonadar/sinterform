@@ -1227,6 +1227,59 @@ Sketch.prototype.shape = function (height, opts) {
   };
 };
 
+// The same profile as a sweep's *section*: what runs along a path rather than
+// what stands up off the plane.
+//
+// A section is a 2D shape, and this file already makes 2D shapes -- so a drawn
+// section is not a new representation, it is a `profile` slot, read by the same
+// polygonSDF, drawn with the same constraints and solved by the same solver.
+// The `kind: 'polygon'` section is the only one that is not three floats,
+// which is the whole point of it.
+//
+//   const { profile, section } = S.section();
+//   SinterForm.profiles = [profile];
+//   const { sweep, node } = SinterSweep.pack(path, section, { closed: true });
+//
+// Two halves come back because they go to two places: `profile` onto the
+// document, where the kernel and the shader both read it by slot, and
+// `section` into sweep.pack, which needs the slot number and -- for bounds and
+// for meshing on the CPU -- the outline's own distance function.
+//
+// The loops are centred on their bounding box by default, so the path runs up
+// the middle of the section. `centre: false` keeps them where they were drawn,
+// which is what a bead laid on a surface wants: draw it sitting on the u axis
+// and it sweeps sitting on the path.
+Sketch.prototype.section = function (opts) {
+  opts = opts || {};
+  const src = this.profile(opts.tol).loops.map(l => l.points);
+  const loops = src.filter(l => l.length >= 3);
+  if (!loops.length) throw new Error('section wants at least one closed loop');
+  let cx = 0, cy = 0;
+  if (opts.centre !== false) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const l of loops) for (const p of l) {
+      if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+    }
+    cx = (x0 + x1) / 2; cy = (y0 + y1) / 2;
+  }
+  const pts = loops.map(l => l.map(p => [p[0] - cx, p[1] - cy]));
+  // How far the section reaches from the path. A vertex is the furthest any
+  // point of a polygon gets from anywhere, so this is exact -- and it has to
+  // be given rather than measured, because sweep.js measures by walking out
+  // from the origin and a section need not contain it.
+  let radius = 0;
+  for (const l of pts) for (const p of l) radius = Math.max(radius, Math.hypot(p[0], p[1]));
+  const slot = opts.fi || 0;
+  const fn = (u, v) => polygonSDF(pts, u, v);
+  fn.radius = radius;
+  fn.loops = pts;
+  return {
+    profile: { name: opts.name || 'section', loops: pts },
+    section: { kind: 'polygon', a: slot, fn, radius }
+  };
+};
+
 const CONSTRAINT_KINDS = Object.keys(CONSTRAINTS);
 
 const SinterSketch = { Sketch, CONSTRAINTS, CONSTRAINT_KINDS, KIND,

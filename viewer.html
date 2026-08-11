@@ -275,6 +275,49 @@ const SCENES = {
     return [{ id: 0, nodes: [N('sweep', node)] }];
   },
 
+  // The same sweep with a section that was *drawn* rather than picked from the
+  // three built-in shapes. A cross-section is a 2D shape, so it is the 2D
+  // sketch this repository already had: solved by the same solver, stored in
+  // the same profile slot the extrude scene uses, read by the same polygonSDF.
+  // Only the push differs -- along a path here, straight up there.
+  'sweep, a drawn section': () => {
+    const S = new SinterSketch.Sketch();
+    const W = 13, T = 3.5, Hh = 12, Tw = 3.2;
+    // a tee, drawn rough: eight corners, no two of them quite square
+    const p = [[-13.2, 0], [12.7, 0.6], [13.4, 3.2], [3.1, 3.6],
+               [3.5, 11.4], [-3.4, 12.1], [-2.9, 3.4], [-13.6, 3.1]]
+      .map(q => S.point(q[0], q[1]));
+    S.fix(p[0]);
+    const e = p.map((_, i) => S.line(p[i], p[(i + 1) % p.length]));
+    // rectilinear: every other edge across, the rest up
+    e.forEach((ed, i) => S.constrain(i % 2 ? 'vertical' : 'horizontal', { e: ed }));
+    const dim = (a, b, mm) => S.constrain('distance', { p: p[a] }, { p: p[b] }, mm);
+    dim(0, 1, 2 * W);            // the flange
+    dim(1, 2, T);                // and its thickness
+    dim(2, 3, W - Tw / 2);       // in to the web
+    dim(3, 4, Hh - T);           // up it
+    dim(4, 5, Tw);               // across the top
+    // the far side of the flange is the near side's height, said once
+    S.constrain('horizontal', { e: S.line(p[3], p[6], { construction: true }) });
+    S.solve();
+
+    // Two halves, because they go to two places: the outline onto the
+    // document, and the section -- slot and all -- into the sweep.
+    const { profile, section } = S.section({ tol: 0.05, name: 'drawn section' });
+    SinterForm.profiles = [profile];
+
+    const P = new SinterSketch3D.Sketch3D();
+    const curve = P.nurbs([P.point(-24, -10, 0), P.point(-6, 12, 5),
+                           P.point(12, -8, 11), P.point(24, 8, 18)]);
+    const fine = P.sample(curve, 0.4);
+    const path = fine.filter((_, i) => i % 4 === 0 || i === fine.length - 1);
+    const { sweep, node } = SinterSweep.pack(path, section,
+      { twist: 1.4, name: 'drawn sweep' });
+    SinterForm.sweeps = [sweep];
+    node.p[2] += 10;
+    return [{ id: 0, nodes: [N('sweep', node)] }];
+  },
+
   'ice cream': () => [{ id: 0, nodes: [
     N('cone',      { p: [0, 0, 19], d: [3, 17, 44], round: 1 }),
     N('ellipsoid', { p: [0, 0, 50.5], d: [35, 35, 28.5] }),
@@ -320,6 +363,12 @@ function status() {
 }
 
 function load(name) {
+  // Empty the slotted stores first. A slot's data is *compiled into* the
+  // shader, so a sweep left behind by the previous scene keeps being unrolled
+  // into every shader after it -- hundreds of lines nothing calls, and on a
+  // software rasteriser that is the difference between a scene that compiles
+  // and one that hangs. Each scene refills what it needs.
+  SinterForm.profiles = []; SinterForm.wires = []; SinterForm.sweeps = [];
   V.show(SCENES[name]());
   V.frame();
   status();
@@ -361,6 +410,11 @@ cv.addEventListener('wheel', e => { e.preventDefault(); V.zoom(Math.exp(e.deltaY
 size();
 load(Object.keys(SCENES)[0]);
 window.__V = V;
+// The scene builders themselves, so a test can build one without asking the
+// page to draw it. A sweep raymarched on a software rasteriser never finishes
+// inside a timeout, and "does this scene still build a plan" is worth knowing
+// separately from "does it draw".
+window.__SCENES = SCENES;
 window.__ready = true;
 </script>
 </body>
