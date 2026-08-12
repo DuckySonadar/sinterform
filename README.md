@@ -61,6 +61,25 @@ points, which is sharper per point but blind to anything the sampling misses —
 bounds that are wrong, a boolean folded the wrong way, a rotation applied in
 the other order. Those change the outline, and the outline is what this shows.
 
+**While you drag, the GPU view shows the meshed twin instead.** The two costs
+are three orders of magnitude apart — a raymarched frame of the sweep scene is
+about 500 ms on the software rasteriser the checks run against and a meshed one
+is 4 ms, and *meshing* it costs about what one raymarched frame costs, since
+filling the grid runs the same `map()` over a comparable number of points. So
+the mesh pays for itself on the second frame of any drag. The status line says
+when a proxy is what you are looking at, and the checkbox turns it off — this
+page exists to compare the two halves, so the substitution must be visible and
+must be refusable.
+
+Two smaller rules fall out of the same measurement. Nothing draws
+synchronously: every input asks for a frame and one animation frame later
+exactly one draw happens, so forty pointer events do not queue forty
+raymarches behind a pointer that has already stopped. And the expensive
+rebuild waits for the input to settle rather than running per event — dragging
+the resolution slider across five stops used to mesh the whole scene five
+times, which on *every primitive* meant five seconds of frozen page, and now
+hands control back in about a millisecond and meshes once.
+
 The first scene, and the one it opens on, is *every primitive* — all of them
 at once, so a broken one is obvious at a glance instead of being found later by
 whichever model happened to use it. `profile` is in it too, drawing its default

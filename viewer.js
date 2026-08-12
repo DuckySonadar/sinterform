@@ -165,9 +165,13 @@ function attach(canvas, opts) {
     plan: [], mode: 'raymarch', tint: [0.91, 0.56, 0.24],
     yaw: -0.9, pitch: 0.55, dist: 140, target: [0, 0, 12],
     res: opts.res || 0.6, flat: false, mesh: null, tris: 0, meshMs: 0,
-    meshedOn: null, lastError: null
+    meshedOn: null, lastError: null,
+    // `mode` is what was asked for; `showing` is what is on the screen. They
+    // differ while the camera is moving -- see the scheduling note below.
+    showing: 'raymarch', meshStale: true, proxy: opts.proxy !== false
   };
-  let prog = null, uni = {}, meshProg = null, meshVao = null, meshCount = 0;
+  let prog = null, uni = {}, meshProg = null, meshUni = {}, meshVao = null,
+      meshBufs = [], meshCount = 0, fullVao = null;
   const uData = new Float32Array(MAXN * 12);
 
   const compile = (type, src) => {
@@ -239,11 +243,20 @@ void main(){
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
       for (const o of [a, b, c]) { N[o] += nx; N[o + 1] += ny; N[o + 2] += nz; }
     }
-    if (!meshProg) meshProg = link(MESH_VS, MESH_FS);
+    if (!meshProg) {
+      meshProg = link(MESH_VS, MESH_FS);
+      for (const k of ['uMVP', 'uTint', 'uEye', 'uFlat'])
+        meshUni[k] = gl.getUniformLocation(meshProg, k);
+    }
+    // The previous mesh's buffers go back to the driver. A slider drag rebuilds
+    // this a dozen times, and a VAO and three buffers a time adds up to real
+    // memory that nothing was ever going to reclaim.
+    freeMesh();
     meshVao = gl.createVertexArray();
     gl.bindVertexArray(meshVao);
     const put = (data, name, size) => {
       const buf = gl.createBuffer();
+      meshBufs.push(buf);
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
       const loc = gl.getAttribLocation(meshProg, name);
@@ -252,12 +265,85 @@ void main(){
     };
     put(P, 'aP', 3); put(N, 'aN', 3);
     const eb = gl.createBuffer();
+    meshBufs.push(eb);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, I, gl.STATIC_DRAW);
     gl.bindVertexArray(null);
     meshCount = I.length;
     view.tris = I.length / 3;
     view.meshMs = Date.now() - t0;
+  }
+
+  function freeMesh() {
+    if (meshVao) gl.deleteVertexArray(meshVao);
+    for (const b of meshBufs) gl.deleteBuffer(b);
+    meshVao = null; meshBufs = []; meshCount = 0;
+  }
+
+  // ---- when to draw, and when to pay for a mesh --------------------------
+  // Two costs three orders of magnitude apart. On the software rasteriser the
+  // checks run against, one raymarched frame of a sweep is ~500 ms and one
+  // meshed frame of the same sweep is ~4 ms -- and meshing it costs about what
+  // a single raymarched frame costs, because filling the grid runs the same
+  // map() over a comparable number of points. So the mesh pays for itself on
+  // the second frame, and everything here follows from that:
+  //
+  //   * Nothing draws synchronously. Every entry point asks for a frame, and
+  //     one animation frame later exactly one draw happens -- so a drag that
+  //     fires forty pointermove events does not queue forty raymarches behind
+  //     a pointer that has already stopped.
+  //   * While the camera is moving, raymarch mode shows the meshed twin
+  //     instead. `view.showing` says which is on the screen, and setProxy(false)
+  //     turns it off for anyone comparing the two halves rather than looking
+  //     at the shape -- which is what this viewer is for, so it must be a
+  //     thing you can switch off and must never be a thing you cannot see.
+  //   * The expensive rebuild waits for the input to settle. Dragging the
+  //     resolution slider used to mesh the whole scene on every input event.
+  // Two ways to know the input is still moving, because there are two kinds of
+  // input. A drag has a beginning and an end, and whoever owns the pointer
+  // knows both -- `hold(true/false)`. A wheel notch or a slider step has
+  // neither, so those are inferred from a quiet period instead. Inferring the
+  // drag as well does not work: a settle shorter than a frame flips back to
+  // the expensive picture *between* two moves of a slow drag, and a settle
+  // longer than a frame makes every release feel stuck.
+  const SETTLE = 180;
+  const raf = root.requestAnimationFrame
+    ? (cb) => root.requestAnimationFrame(cb)
+    : (cb) => setTimeout(cb, 16);
+  let frameReq = 0, settleTimer = 0, held = false, ticking = false, camTick = false;
+  // Any input still in flight, which is what the rebuild waits for -- and the
+  // narrower question of whether the *camera* is what is moving, which is the
+  // only thing a proxy answers. Dragging the resolution slider defers the
+  // rebuild but has no business putting a proxy in front of the shader.
+  const busy = () => held || ticking;
+  const cameraMoving = () => held || (ticking && camTick);
+
+  function requestDraw() {
+    if (frameReq) return;
+    frameReq = raf(() => { frameReq = 0; draw(); });
+  }
+  // Something continuous changed: show what is cheap now, and book the
+  // expensive part for when it stops.
+  function moved(isCamera) {
+    ticking = true;
+    camTick = !!isCamera;
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(settle, SETTLE);
+    requestDraw();
+  }
+  function settle() {
+    settleTimer = 0;
+    ticking = false;
+    if (held) return;                    // still dragging; the release settles
+    if (view.mode === 'mesh' && view.meshStale) meshNow();
+    requestDraw();
+    if (opts.onchange) opts.onchange(view);
+  }
+  // The mesh, built at most once per settle and never twice for the same grid.
+  function meshNow() {
+    if (!view.meshStale && meshVao) return;
+    try { buildMesh(); view.meshStale = false; }
+    catch (e) { view.lastError = String(e.message || e); }
   }
 
   // ---- camera -----------------------------------------------------------
@@ -343,6 +429,9 @@ void main(){
   let at = new Map();
   function rebuild() {
     view.lastError = null;
+    // A rebuild means the plan changed, so whatever was meshed is a mesh of
+    // something else.
+    view.meshStale = true;
     try {
       dropStaleTextures();
       const { src, at: a } = fragSource(view.plan);
@@ -355,16 +444,26 @@ void main(){
       for (let i = 0; i < MAXFIELDS; i++)
         uni['uField' + i] = gl.getUniformLocation(prog, 'uField' + i);
     } catch (e) { view.lastError = String(e.message || e); }
-    if (view.mode === 'mesh') { try { buildMesh(); } catch (e) { view.lastError = String(e.message || e); } }
+    if (view.mode === 'mesh') meshNow();
   }
 
   function draw() {
     const w = canvas.width, h = canvas.height;
+    // What can be drawn now, which is not always what `mode` asked for. A
+    // stale mesh is a fine proxy while something is still moving -- it is
+    // already only a proxy -- so the rebuild waits for `settle`. Having none
+    // at all is different: then it is built here, on the frame a raymarch
+    // would have cost about as much anyway.
+    const proxying = view.mode === 'raymarch' && view.proxy && cameraMoving();
+    if ((view.mode === 'mesh' || proxying) && (!meshVao || !busy())) meshNow();
+    const meshed = view.mode === 'mesh' || (proxying && meshCount > 0);
+    view.showing = !meshed ? 'raymarch' : view.mode === 'mesh' ? 'mesh' : 'proxy';
+
     gl.viewport(0, 0, w, h);
     if (view.flat) gl.clearColor(0, 0, 0, 1); else gl.clearColor(0.05, 0.058, 0.070, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     const C = camera();
-    if (view.mode === 'mesh') {
+    if (meshed) {
       if (!meshVao || !meshCount) return;
       gl.enable(gl.DEPTH_TEST);
       gl.useProgram(meshProg);
@@ -381,10 +480,10 @@ void main(){
         let s = 0; for (let k = 0; k < 4; k++) s += proj[k * 4 + j] * vm[i * 4 + k];
         M[i * 4 + j] = s;
       }
-      gl.uniformMatrix4fv(gl.getUniformLocation(meshProg, 'uMVP'), false, M);
-      gl.uniform3f(gl.getUniformLocation(meshProg, 'uTint'), 0.42, 0.72, 0.95);
-      gl.uniform3f(gl.getUniformLocation(meshProg, 'uEye'), C.eye[0], C.eye[1], C.eye[2]);
-      gl.uniform1f(gl.getUniformLocation(meshProg, 'uFlat'), view.flat ? 1 : 0);
+      gl.uniformMatrix4fv(meshUni.uMVP, false, M);
+      gl.uniform3f(meshUni.uTint, 0.42, 0.72, 0.95);
+      gl.uniform3f(meshUni.uEye, C.eye[0], C.eye[1], C.eye[2]);
+      gl.uniform1f(meshUni.uFlat, view.flat ? 1 : 0);
       gl.bindVertexArray(meshVao);
       gl.drawElements(gl.TRIANGLES, meshCount, gl.UNSIGNED_INT, 0);
       gl.bindVertexArray(null);
@@ -404,31 +503,61 @@ void main(){
     gl.uniform1f(uni.uHit, 0.0006);
     gl.uniform1f(uni.uFlat, view.flat ? 1 : 0);
     gl.uniform4fv(uni.uD, uData);
-    gl.bindVertexArray(gl.createVertexArray());
+    // One vertex array for the whole session. This used to make a new one per
+    // frame and never delete it, which at sixty frames a second is a leak you
+    // can watch grow.
+    if (!fullVao) fullVao = gl.createVertexArray();
+    gl.bindVertexArray(fullVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindVertexArray(null);
   }
 
   return {
     view,
-    show(plan) { view.plan = plan; rebuild(); draw(); return this; },
+    show(plan) { view.plan = plan; rebuild(); requestDraw(); return this; },
+    // A mode switch is deliberate rather than continuous, so it pays for its
+    // mesh there and then instead of showing nothing for a frame.
     setMode(m) {
-      view.mode = m;
-      if (m === 'mesh' && !meshVao) { try { buildMesh(); } catch (e) { view.lastError = String(e.message || e); } }
-      draw(); return this;
+      if (m !== view.mode) { view.mode = m; if (m === 'mesh') meshNow(); }
+      requestDraw(); return this;
     },
-    setRes(r) { view.res = r; if (view.mode === 'mesh') buildMesh(); draw(); return this; },
-    setFlat(on) { view.flat = !!on; draw(); return this; },
-    orbit(dy, dp) { view.yaw += dy; view.pitch = Math.max(-1.5, Math.min(1.5, view.pitch + dp)); draw(); },
-    zoom(f) { view.dist = Math.max(8, Math.min(900, view.dist * f)); draw(); },
+    // The slider fires on every pixel of its travel. Mark the mesh stale, keep
+    // drawing the old one, and rebuild once the hand stops moving.
+    setRes(r) {
+      if (r === view.res) return this;
+      view.res = r; view.meshStale = true;
+      moved(false); return this;
+    },
+    setFlat(on) { view.flat = !!on; requestDraw(); return this; },
+    setProxy(on) { view.proxy = !!on; requestDraw(); return this; },
+    // "A drag is in progress" / "it has ended". Whoever owns the pointer knows
+    // this exactly; the viewer would only be guessing at it from a timer.
+    hold(on) {
+      held = !!on;
+      if (held) {
+        if (settleTimer) { clearTimeout(settleTimer); settleTimer = 0; }
+        ticking = false;
+        requestDraw();
+      } else moved(true);
+      return this;
+    },
+    orbit(dy, dp) {
+      view.yaw += dy;
+      view.pitch = Math.max(-1.5, Math.min(1.5, view.pitch + dp));
+      moved(true);
+    },
+    zoom(f) { view.dist = Math.max(8, Math.min(900, view.dist * f)); moved(true); },
     frame(nodes) {
       const B = SF.sceneBounds(nodes || view.plan.flatMap(p => p.nodes));
       if (!B) return this;
       view.target = [0, 1, 2].map(i => (B.lo[i] + B.hi[i]) / 2);
       const span = Math.max(B.hi[0] - B.lo[0], B.hi[1] - B.lo[1], B.hi[2] - B.lo[2]);
       view.dist = Math.max(24, span * 2.1);
-      draw(); return this;
+      requestDraw(); return this;
     },
-    draw, rebuild, buildMesh
+    // `draw` stays synchronous and public: a test that wants a frame *now*
+    // should not have to wait for an animation frame to be scheduled.
+    draw, rebuild, buildMesh: meshNow
   };
 }
 

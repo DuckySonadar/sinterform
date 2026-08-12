@@ -41,6 +41,9 @@
   #err { color:#ff7b6b; font-size:11.5px; white-space:pre-wrap; display:none; }
   .hint { color:var(--dim); font-size:11px; border-top:1px solid var(--line); padding-top:10px; }
   .swatch { display:inline-block; width:8px; height:8px; border-radius:2px; vertical-align:middle; }
+  .chk { display:flex; align-items:center; gap:7px; color:var(--dim); font-size:11.5px;
+         cursor:pointer; user-select:none; }
+  .chk input { accent-color:var(--hot); margin:0; }
 </style>
 </head>
 <body>
@@ -69,12 +72,21 @@
       <input type="range" id="res" min="0.2" max="2" step="0.1" value="0.6">
     </div>
 
+    <div class="grp">
+      <label class="chk"><input type="checkbox" id="proxy" checked>
+        Mesh proxy while moving</label>
+    </div>
+
     <div class="hint">
       <b>Both modes draw the same scene.</b> <span class="swatch" style="background:var(--hot)"></span>
       GLSL runs <code>glsl.js</code> on the GPU;
       <span class="swatch" style="background:var(--cool)"></span> mesh runs the JS twins in
       <code>sinterform.js</code> through <code>surfaceNets</code>. They are meant to be the
       same shape — flip between them and any drift is visible.
+      <br><br>While you drag, the GPU view shows the meshed twin instead: a
+      raymarched frame of a sweep costs a hundred meshed ones, and meshing costs
+      about one of them. The status line says when you are looking at it, and
+      the checkbox turns it off when what you are comparing <i>is</i> the two.
       <br><br>Drag to orbit · scroll to zoom.
     </div>
   </div>
@@ -335,7 +347,9 @@ const cv = document.getElementById('view');
 const $ = id => document.getElementById(id);
 let V;
 try {
-  V = SinterView.attach(cv);
+  // The viewer defers its expensive work to when the input settles, so it has
+  // to be able to tell the panel that the picture changed after the fact.
+  V = SinterView.attach(cv, { onchange: () => status() });
 } catch (e) {
   // Without WebGL2 there is nothing to draw, and throwing here would leave the
   // panel half built and the scene list empty -- which reads as a broken page
@@ -356,11 +370,16 @@ addEventListener('resize', size);
 
 function status() {
   const v = V.view;
-  const bits = [`mode: ${v.mode === 'mesh' ? 'meshed, surface nets' : 'GLSL, raymarched'}`];
+  // What was asked for, and -- when they differ -- what is actually on the
+  // screen. A proxy nobody can see is a proxy that will be mistaken for the
+  // shader's own answer, which is the one thing this page exists to show.
+  const bits = [`mode: ${v.mode === 'mesh' ? 'meshed, surface nets' : 'GLSL, raymarched'}`
+    + (v.showing === 'proxy' ? ' — showing the meshed proxy' : '')];
   const shapes = v.plan.reduce((s, p) => s + p.nodes.length, 0);
   bits.push(`${shapes} shape${shapes === 1 ? '' : 's'} · ${v.plan.length} bod${v.plan.length === 1 ? 'y' : 'ies'}`);
-  if (v.mode === 'mesh') bits.push(`${v.tris.toLocaleString()} triangles · ${v.meshMs} ms @ ${v.res} mm`
-    + (v.meshedOn ? ` · grid on the ${v.meshedOn}` : ''));
+  if (v.showing !== 'raymarch') bits.push(`${v.tris.toLocaleString()} triangles · ${v.meshMs} ms @ ${v.res} mm`
+    + (v.meshedOn ? ` · grid on the ${v.meshedOn}` : '')
+    + (v.meshStale ? ' · remeshing when you stop' : ''));
   else bits.push(`step ${SinterView.STEP} of the reported distance`);
   $('stat').textContent = bits.join('\n');
   $('err').style.display = v.lastError ? 'block' : 'none';
@@ -403,22 +422,30 @@ $('res').oninput = (e) => {
 
 // pointer: drag orbits, wheel zooms
 let down = false, lx = 0, ly = 0;
-cv.addEventListener('pointerdown', e => { down = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); });
-cv.addEventListener('pointerup', e => { down = false; });
+cv.addEventListener('pointerdown', e => {
+  down = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId);
+  V.hold(true);                       // a drag has a beginning and an end, and
+});                                   // this is the only place that knows them
+cv.addEventListener('pointerup', () => { down = false; V.hold(false); });
+cv.addEventListener('pointercancel', () => { down = false; V.hold(false); });
 cv.addEventListener('pointermove', e => {
   if (!down) return;
   V.orbit((e.clientX - lx) * 0.008, (e.clientY - ly) * 0.006);
   lx = e.clientX; ly = e.clientY;
 });
 cv.addEventListener('wheel', e => { e.preventDefault(); V.zoom(Math.exp(e.deltaY * 0.0012)); }, { passive: false });
+// The camera keeps moving for a moment after the pointer does -- the viewer
+// waits for the input to settle before it goes back to the expensive picture --
+// so the panel is refreshed on that same beat rather than on pointerup.
+cv.addEventListener('pointermove', () => { if (down) status(); });
+
+$('proxy').onchange = (e) => { V.setProxy(e.target.checked); status(); };
 
 size();
 load(Object.keys(SCENES)[0]);
 window.__V = V;
 // The scene builders themselves, so a test can build one without asking the
-// page to draw it. A sweep raymarched on a software rasteriser never finishes
-// inside a timeout, and "does this scene still build a plan" is worth knowing
-// separately from "does it draw".
+// page to draw it — worth knowing separately from "does it draw".
 window.__SCENES = SCENES;
 window.__ready = true;
 </script>
