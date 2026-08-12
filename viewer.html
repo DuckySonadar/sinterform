@@ -434,11 +434,6 @@ cv.addEventListener('pointermove', e => {
   lx = e.clientX; ly = e.clientY;
 });
 cv.addEventListener('wheel', e => { e.preventDefault(); V.zoom(Math.exp(e.deltaY * 0.0012)); }, { passive: false });
-// The camera keeps moving for a moment after the pointer does -- the viewer
-// waits for the input to settle before it goes back to the expensive picture --
-// so the panel is refreshed on that same beat rather than on pointerup.
-cv.addEventListener('pointermove', () => { if (down) status(); });
-
 $('proxy').onchange = (e) => { V.setProxy(e.target.checked); status(); };
 
 size();

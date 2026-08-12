@@ -337,6 +337,17 @@ void main(){
     if (held) return;                    // still dragging; the release settles
     if (view.mode === 'mesh' && view.meshStale) meshNow();
     requestDraw();
+  }
+  // Whoever is showing `view.showing` has to be told *after* the draw that
+  // changed it, not before: settle() only asks for a frame, and what is on the
+  // screen is not decided until that frame runs. Telling them at settle time
+  // left the panel saying "showing the meshed proxy" over a raymarched
+  // picture, which is precisely the lie this field exists to prevent.
+  let reported = null;
+  function announce() {
+    const now = view.showing + '/' + view.meshStale + '/' + view.meshMs;
+    if (now === reported) return;
+    reported = now;
     if (opts.onchange) opts.onchange(view);
   }
   // The mesh, built at most once per settle and never twice for the same grid.
@@ -487,6 +498,7 @@ void main(){
       gl.bindVertexArray(meshVao);
       gl.drawElements(gl.TRIANGLES, meshCount, gl.UNSIGNED_INT, 0);
       gl.bindVertexArray(null);
+      announce();
       return;
     }
     if (!prog) return;
@@ -510,6 +522,7 @@ void main(){
     gl.bindVertexArray(fullVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
+    announce();
   }
 
   return {
