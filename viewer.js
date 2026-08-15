@@ -151,7 +151,8 @@ function fragSource(plan) {
   return { src: PREAMBLE + `${GL.library()}\n`
     + `${GL.slotBlock(view.plan, { profile: slotsOf('profile', SF.profiles),
                                    wire: slotsOf('wire', SF.wires),
-                                   sweep: slotsOf('sweep', SF.sweeps) })}\n`
+                                   sweep: slotsOf('sweep', SF.sweeps),
+                                   construct: slotsOf('construct', SF.constructs) })}\n`
     + `float map(vec3 P){\n`
     + `  float d = 1e9, dB, di; vec3 q;\n${body}  return d;\n}\n` + TAIL, at };
 }

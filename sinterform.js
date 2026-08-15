@@ -81,6 +81,13 @@ let wires = [];          // [{ name, lines: [[[x, y, z, r], ...], ...] }]
 // out for it. `SinterSweep.pack()` builds them; this file only evaluates.
 let sweeps = [];         // [{ name, segs: Float64Array, kind, sect: [a, b, c] }]
 
+// Constructs: masses hung on a skeleton of connectors. Like a sweep's, the
+// items are not raw geometry -- each carries the frame `SinterConstruct.pack()`
+// resolved for it by walking the connector tree, so this file evaluates a flat
+// list and never sees a hierarchy. That is what makes a pose cheap: the tree is
+// walked once per repack, not once per sample.
+let constructs = [];     // [{ name, items: Float64Array }]
+
 // iq's polygon distance: nearest edge for the magnitude, a crossing count for
 // the sign. Loops beyond the first are holes -- a point inside an odd number
 // of them is outside the material. Exact, and 1-Lipschitz.
@@ -203,6 +210,62 @@ function sweepSegs(w) {
 function swCount(e) { return Math.floor(e.length / SWEEP_STRIDE); }
 function swf(e, i, k) { return e[SWEEP_STRIDE * i + k]; }
 
+// A construct's items come pre-packed too, and for a sharper version of the
+// same reason: building them means walking a connector tree and composing each
+// joint's rotation down the chain, which is construction and belongs to
+// construct.js. What arrives here is flat -- one mass per item, carrying the
+// frame already resolved and already inverted, so evaluating it is arithmetic
+// and nothing else.
+//
+//   0..2 cull centre   3 cull radius   4..6 origin
+//   7..9 inverse rotation, imaginary   10 its real part
+//   11..13 dims        14..16 kind, tip, blend
+const CON_STRIDE = 17;
+
+// An empty slot is a shape, same rule as the wire's tapered run and the
+// profile's square: a node can name a construct the application has not filled
+// in, and a primitive that draws nothing is a primitive nobody can see to fix.
+//
+// This one is a small armature rather than a single mass, because what a
+// construct *is* -- masses on a skeleton, blended where they meet -- is not
+// visible in one of anything. It uses all four kinds and one connector turned
+// off-axis, so the default is also the case that would catch a broken
+// quaternion, a broken cull or a broken kind dispatch the moment anybody
+// looked at the viewer's every-primitive scene.
+const DEFAULT_CONSTRUCT = (() => {
+  const e = [];
+  // cx, cy, cz, cull radius, ox, oy, oz, inverse quaternion (x, y, z, w),
+  // dims, kind, tip, blend -- the layout above, written the way it is read
+  const put = (c, cr, o, q, dm, kind, tip, k) =>
+    e.push(c[0], c[1], c[2], cr + k, o[0], o[1], o[2], q[0], q[1], q[2], q[3],
+           dm[0], dm[1], dm[2], kind, tip, k);
+  const I = [0, 0, 0, 1];
+  // a turn of `a` degrees about +Y, inverted: the arms, and the only thing
+  // here that is not axis-aligned
+  const rad = Math.PI / 180;             // RAD itself is declared further down
+  const armQ = (a) => {
+    const h = a * rad * 0.5;
+    return [0, -Math.sin(h), 0, Math.cos(h)];
+  };
+  const armDir = (a) => [Math.sin(a * rad), 0, Math.cos(a * rad)];
+  put([0, 0, -4], 14, [0, 0, -14], I, [4, 0, 20], 0, 3, 0);        // spine
+  put([0, 0, -2], 8, [0, 0, -2], I, [7, 5, 8], 1, 0, 3);           // chest
+  put([0, 0, 11], 5, [0, 0, 11], I, [5, 0, 0], 2, 0, 2.5);         // head
+  put([0, -1, -19], Math.hypot(5, 7, 2.5), [0, -1, -19], I,
+      [5, 7, 2.5], 3, 1.2, 2);                                     // base
+  for (const a of [50, -50]) {
+    const u = armDir(a);
+    put([7 * u[0], 0, 4 + 7 * u[2]], 9.2, [0, 0, 4], armQ(a), [2.2, 0, 14], 0, 1.4, 2);
+  }
+  return Float64Array.from(e);
+})();
+function conItems(c) {
+  const it = c && c.items;
+  return (it && it.length >= CON_STRIDE) ? it : DEFAULT_CONSTRUCT;
+}
+function conCount(e) { return Math.floor(e.length / CON_STRIDE); }
+function conf(e, i, k) { return e[CON_STRIDE * i + k]; }
+
 // The JS half of the sweep's polygon-section hook: a slot number and a point
 // in the section plane. Same outlines, same polygonSDF, same default -- a
 // sweep's section is a 2D sketch and nothing else.
@@ -217,6 +280,7 @@ function slotItems(t, obj) {
   if (t === 'wire') return wireSegments(obj);
   if (t === 'profile') return outlineEdges(obj);
   if (t === 'sweep') return sweepSegs(obj);
+  if (t === 'construct') return conItems(obj);
   throw new Error('not a slotted primitive: ' + t);
 }
 
@@ -392,6 +456,43 @@ function sweepSection(kind, sp_0, sp_1, sp_2, u, v) {
       return Math.max((Math.hypot(u, v) - sp_0), (-v));
     }
     return sectionPoly(sp_0, u, v);
+}
+// constructMass — from GLSL.construct.src
+function constructMass(kind, q_0, q_1, q_2, dm_0, dm_1, dm_2, tip) {
+    if ((kind < 0.5)) {
+      let r0 = dm_0;
+      let h = dm_2;
+      let sl = ((r0 - tip) / h);
+      let a2 = (1.0 - (sl * sl));
+      if ((a2 <= 0.0)) {
+        return Math.min((Math.hypot(q_0, q_1, q_2) - r0), (Math.hypot((q_0 - 0.0), (q_1 - 0.0), (q_2 - h)) - tip));
+      }
+      let a = Math.sqrt(a2);
+      let w_0 = Math.hypot(q_0, q_1), w_1 = q_2;
+      let t = (w_0*(-sl) + w_1*a);
+      if ((t < 0.0)) {
+        return (Math.hypot(w_0, w_1) - r0);
+      }
+      if ((t > (a * h))) {
+        return (Math.hypot((w_0 - 0.0), (w_1 - h)) - tip);
+      }
+      return ((w_0*a + w_1*sl) - r0);
+    }
+    if ((kind < 1.5)) {
+      let rr_0 = Math.max(dm_0, 1e-3), rr_1 = Math.max(dm_1, 1e-3), rr_2 = Math.max(dm_2, 1e-3);
+      let k0 = Math.hypot((q_0 / rr_0), (q_1 / rr_1), (q_2 / rr_2));
+      let k1 = Math.hypot((q_0 / (rr_0 * rr_0)), (q_1 / (rr_1 * rr_1)), (q_2 / (rr_2 * rr_2)));
+      if ((k1 < 1e-6)) {
+        return (-Math.min(rr_0, Math.min(rr_1, rr_2)));
+      }
+      return ((k0 * (k0 - 1.0)) / k1);
+    }
+    if ((kind < 2.5)) {
+      return (Math.hypot(q_0, q_1, q_2) - dm_0);
+    }
+    let e_0 = Math.max((dm_0 - tip), 0.0), e_1 = Math.max((dm_1 - tip), 0.0), e_2 = Math.max((dm_2 - tip), 0.0);
+    let g_0 = (Math.abs(q_0) - e_0), g_1 = (Math.abs(q_1) - e_1), g_2 = (Math.abs(q_2) - e_2);
+    return ((Math.hypot(Math.max(g_0, 0.0), Math.max(g_1, 0.0), Math.max(g_2, 0.0)) + Math.min(Math.max(g_0, Math.max(g_1, g_2)), 0.0)) - tip);
 }
 const TWINS = {
   // pSphere — from GLSL.sphere.src
@@ -766,6 +867,33 @@ const TWINS = {
     let db = (Math.abs(p_2) - d_2);
     return (Math.min(Math.max(da, db), 0.0) + Math.hypot(Math.max(da, 0.0), Math.max(db, 0.0)));
   },
+  // pConstruct — from GLSL.construct.src
+  construct: (p, d, r, $node) => {
+    const c = conItems(constructs[($node && $node.fi) || 0]);
+    let p_0 = p[0], p_1 = p[1], p_2 = p[2];
+    let d_0 = d[0], d_1 = d[1], d_2 = d[2];
+    let best = 1e18;
+    let n = conCount(c);
+    let i = 0;
+    for (; (i < n);) {
+      let bc_0 = conf(c,i,0), bc_1 = conf(c,i,1), bc_2 = conf(c,i,2);
+      let br = conf(c,i,3);
+      let bd = (Math.hypot((p_0 - bc_0), (p_1 - bc_1), (p_2 - bc_2)) - br);
+      if ((bd < best)) {
+        let org_0 = conf(c,i,4), org_1 = conf(c,i,5), org_2 = conf(c,i,6);
+        let qv_0 = conf(c,i,7), qv_1 = conf(c,i,8), qv_2 = conf(c,i,9);
+        let qw = conf(c,i,10);
+        let dm_0 = conf(c,i,11), dm_1 = conf(c,i,12), dm_2 = conf(c,i,13);
+        let ms_0 = conf(c,i,14), ms_1 = conf(c,i,15), ms_2 = conf(c,i,16);
+        let pa_0 = (p_0 - org_0), pa_1 = (p_1 - org_1), pa_2 = (p_2 - org_2);
+        let t_0 = ((qv_1 * pa_2) - (qv_2 * pa_1)), t_1 = ((qv_2 * pa_0) - (qv_0 * pa_2)), t_2 = ((qv_0 * pa_1) - (qv_1 * pa_0));
+        let lp_0 = (pa_0 + (((t_0 * qw) + ((qv_1 * t_2) - (qv_2 * t_1))) * 2.0)), lp_1 = (pa_1 + (((t_1 * qw) + ((qv_2 * t_0) - (qv_0 * t_2))) * 2.0)), lp_2 = (pa_2 + (((t_2 * qw) + ((qv_0 * t_1) - (qv_1 * t_0))) * 2.0));
+        best = smin(best, Math.max(constructMass(ms_0, lp_0, lp_1, lp_2, dm_0, dm_1, dm_2, ms_1), (bd + ms_2)), ms_2);
+      }
+      i += 1;
+    }
+    return best;
+  },
 };
 // >>> generated twins
 
@@ -963,6 +1091,26 @@ const PRIMS = {
     // behind it is a 20 x 20 x 12 mm slab rather than nothing at all
     def: [10, 10, 6],
     js: TWINS.profile,
+    ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
+  },
+  // Masses hung on a skeleton of connectors. The skeleton is on the document
+  // and `fi` says which; the dims are purely the bounds, because everything
+  // about the shape -- and everything about the pose -- is in the items
+  // `SinterConstruct.pack()` resolved.
+  //
+  // `exact: false` for the reason a blend always breaks it: every joint folds
+  // with `smin`, and inside a blend shell the gradient is under one. It stays
+  // 1-Lipschitz, which is what the marcher actually rests on, because rigid
+  // frames and exact masses cannot make it anything else -- but it is a bound
+  // and says so.
+  construct: {
+    name: 'Construct', round: false, baked: true, exact: false,
+    dims: [['Half width', 0.5, 400, 0.5], ['Half depth', 0.5, 400, 0.5],
+           ['Half height', 0.5, 400, 0.5]],
+    // matches DEFAULT_CONSTRUCT, so a construct node with no rig behind it is
+    // a small armature rather than nothing at all
+    def: [13, 9, 22.5],
+    js: TWINS.construct,
     ext: d => [d[0] || 1, d[1] || 1, d[2] || 1]
   }
 };
@@ -1245,8 +1393,11 @@ const SinterForm = {
   set wires(v) { wires = v; },
   get sweeps() { return sweeps; },
   set sweeps(v) { sweeps = v; },
+  get constructs() { return constructs; },
+  set constructs(v) { constructs = v; },
   decodeField, encodeField, sampleField,
   polygonSDF, profileExtent, wireExtent, slotItems, slotList, SWEEP_STRIDE,
+  CON_STRIDE,
   smin, smax, invRot, roundSlot,
   sceneSDF, sceneBounds, surfaceNets, mesh, meshToSTL
 };

@@ -20,18 +20,21 @@
  * silent mistranslation, which is the property that matters -- a primitive that
  * cannot be translated must not quietly get a wrong twin.
  *
- * Nothing is excluded. Two primitives read data rather than computing from
- * their dims -- `field` samples a grid, `profile` walks an outline -- and the
- * one thing a shader and JavaScript genuinely cannot share is how they reach
- * that data: one asks a sampler, the other indexes an array. So those reads,
- * and only those, are INTRINSICS: named GLSL functions declared here to have a
- * JS counterpart instead of being translated. Everything around them -- the
- * box union, the slab, the crossing count, the nearest-edge search -- is
- * ordinary GLSL and is generated like everything else.
+ * Nothing is excluded. Five primitives read data rather than computing from
+ * their dims -- `field` samples a grid, `profile` walks an outline, `wire` its
+ * segments, `sweep` and `construct` their packed items -- and the one thing a
+ * shader and JavaScript genuinely cannot share is how they reach that data:
+ * one asks a sampler or reads items compiled into its own source, the other
+ * indexes an array. So those reads, and only those, are INTRINSICS: named GLSL
+ * functions declared here to have a JS counterpart instead of being
+ * translated. Everything around them -- the box union, the slab, the crossing
+ * count, the nearest-edge search, the quaternion -- is ordinary GLSL and is
+ * generated like everything else.
  *
- * That is the whole of the seam, and it is two functions wide. An intrinsic
- * must be declared below; an undeclared call is an error, so the seam cannot
- * widen by accident.
+ * That is the whole of the seam: one group of reads per data-carrying
+ * primitive, and it widens only when one is added. An intrinsic must be
+ * declared below; an undeclared call is an error, so the seam cannot widen by
+ * accident.
  */
 import { readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -82,7 +85,19 @@ const INTRINSICS = {
   // dispatcher over the profile slots and this calls it.
   sectionPoly: { t: 'float', keep: true, js: 'sectionPoly($0, $1, $2)' },
   edgeA:       { t: 'vec2',  js: ['edgeAx($0, $1)', 'edgeAy($0, $1)'] },
-  edgeB:       { t: 'vec2',  js: ['edgeBx($0, $1)', 'edgeBy($0, $1)'] }
+  edgeB:       { t: 'vec2',  js: ['edgeBx($0, $1)', 'edgeBy($0, $1)'] },
+  // A construct's item is one mass on one connector, laid out in the order
+  // pConstruct reads it: the four the cull test needs first, then the frame,
+  // then the shape. construct.js packs exactly this and check-construct holds
+  // it to the same offsets.
+  conCount: { t: 'int',   js: 'conCount($0)' },
+  conCull:  { t: 'vec3',  js: ['conf($0,$1,0)', 'conf($0,$1,1)', 'conf($0,$1,2)'] },
+  conCullR: { t: 'float', js: 'conf($0,$1,3)' },
+  conOrg:   { t: 'vec3',  js: ['conf($0,$1,4)', 'conf($0,$1,5)', 'conf($0,$1,6)'] },
+  conQ:     { t: 'vec3',  js: ['conf($0,$1,7)', 'conf($0,$1,8)', 'conf($0,$1,9)'] },
+  conQW:    { t: 'float', js: 'conf($0,$1,10)' },
+  conMass:  { t: 'vec3',  js: ['conf($0,$1,11)', 'conf($0,$1,12)', 'conf($0,$1,13)'] },
+  conMisc:  { t: 'vec3',  js: ['conf($0,$1,14)', 'conf($0,$1,15)', 'conf($0,$1,16)'] }
 };
 // `$node` rather than `n`: a GLSL local may legitimately be called `n`, and a
 // generated `let n` beside a parameter `n` is a SyntaxError rather than a
@@ -100,7 +115,8 @@ const OPAQUE = {
   sampler3D: `fields[(${NODE_ARG} && ${NODE_ARG}.fi) || 0]`,
   outline:   `outlineEdges(profiles[(${NODE_ARG} && ${NODE_ARG}.fi) || 0])`,
   polyline:  `wireSegments(wires[(${NODE_ARG} && ${NODE_ARG}.fi) || 0])`,
-  sweeppath: `sweepSegs(sweeps[(${NODE_ARG} && ${NODE_ARG}.fi) || 0])`
+  sweeppath: `sweepSegs(sweeps[(${NODE_ARG} && ${NODE_ARG}.fi) || 0])`,
+  rig:       `conItems(constructs[(${NODE_ARG} && ${NODE_ARG}.fi) || 0])`
 };
 
 // ---------------------------------------------------------------- tokens ----
@@ -837,15 +853,38 @@ ${slots.map(({ key, fn, u }) => `  ${key}: {
 };
 
 // One slot's function. \`items\` is what SinterForm.slotItems returned for it.
-function slotDecl(key, i, items) {
+//
+// \`uniform\` is what makes a *pose* different from a *shape*. Without it the
+// item data is compiled straight into the function as literals, which is what
+// a wire or a sweep wants: the numbers are the geometry, and a compiler that
+// can see them folds the item's arithmetic away before it ever runs. A
+// construct's numbers change every frame an animation runs, and recompiling a
+// shader per frame is not a thing anyone can afford -- so the literals become
+// reads out of a uniform array instead. The *indices* stay literal, which is
+// the part that matters: WebGL2 still never indexes an array dynamically, so
+// the unrolling buys what it was written to buy, and only the values move.
+function slotDecl(key, i, items, uniform) {
   const U = UNROLL[key];
   if (!U) throw new Error('not a slotted primitive: ' + key);
   const f = (v) => (Number.isFinite(v) ? v : 0).toPrecision(8);
+  const nm = uniform && uniform.name;
+  const rd = (j) => nm + '[' + (j >> 2) + '].' + 'xyzw'[j & 3];
+  // components landing inside one vec4 are a swizzle rather than a
+  // constructor: the same reads, a third of the source
+  const grp = (j, w) => {
+    if (w === 1) return rd(j);
+    if ((j & 3) + w <= 4)
+      return nm + '[' + (j >> 2) + '].' + 'xyzw'.slice(j & 3, (j & 3) + w);
+    const c = [];
+    for (let m = 0; m < w; m++) c.push(rd(j + m));
+    return 'vec' + w + '(' + c.join(',') + ')';
+  };
   let body = '';
   for (let o = 0; o + U.stride <= items.length; o += U.stride) {
     const args = [];
     let k = o;
     for (const w of U.arity) {
+      if (uniform) { args.push(grp(uniform.base + k, w)); k += w; continue; }
       const c = [];
       for (let j = 0; j < w; j++) c.push(f(items[k++]));
       args.push(w === 1 ? c[0] : \`vec\${w}(\${c.join(',')})\`);
@@ -862,11 +901,41 @@ function slotDecl(key, i, items) {
 // document has not filled in yet, and an undeclared function is a compile
 // error rather than an empty shape -- so the caller passes one \`items\` array
 // per slot, and SinterForm.slotItems turns an absent entry into the default.
-function slotDecls(key, itemsPerSlot, count) {
-  const n = Math.max(count | 0, (itemsPerSlot || []).length, 1);
-  let s = '';
-  for (let i = 0; i < n; i++) s += slotDecl(key, i, (itemsPerSlot || [])[i] || []);
+//
+// \`uniform\`, when given, is the name of the vec4 array the items are read out
+// of, and the declaration comes back with them. Feed it with slotUniformData.
+function slotDecls(key, itemsPerSlot, count, uniform) {
+  const F = slotFill(itemsPerSlot, count);
+  const u = typeof uniform === 'string' ? { name: uniform } : uniform;
+  let s = u ? 'uniform vec4 ' + u.name + '[' + F.vec4s + '];\\n' : '';
+  for (let i = 0; i < F.list.length; i++)
+    s += slotDecl(key, i, F.list[i], u ? { name: u.name, base: F.bases[i] } : null);
   return s;
+}
+
+// One slot list, padded out to the slot count a shader has to be able to name,
+// and where each slot's items begin in the flat uniform array. Both the
+// source's reads and the consumer's upload come through here, so the two
+// cannot disagree about which float is which -- the same reason the shape
+// layout lives in this file rather than in whoever packs it.
+function slotFill(itemsPerSlot, count) {
+  const n = Math.max(count | 0, (itemsPerSlot || []).length, 1);
+  const list = [];
+  for (let i = 0; i < n; i++) list.push((itemsPerSlot || [])[i] || []);
+  const bases = [];
+  let f = 0;
+  for (const it of list) { bases.push(f); f += it.length; }
+  return { list, bases, floats: f, vec4s: Math.max(Math.ceil(f / 4), 1) };
+}
+
+// The numbers those reads expect, in that layout, padded to whole vec4s. A
+// consumer uploads this and nothing else.
+function slotUniformData(itemsPerSlot, count) {
+  const F = slotFill(itemsPerSlot, count);
+  const out = new Float32Array(F.vec4s * 4);
+  let n = 0;
+  for (const it of F.list) for (let j = 0; j < it.length; j++) out[n++] = it[j];
+  return out;
 }
 `;
 

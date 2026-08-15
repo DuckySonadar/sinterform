@@ -90,7 +90,35 @@ const PACKED = SW.pack(SWPATH, { kind: 'rect', a: 8, b: 4, c: 1 },
                        { scale: (t) => 1 + 0.8 * t, twist: 1.1 });
 SF.sweeps = [PACKED.sweep];
 
-const DIMS = { wire: SF.wireExtent(TEST_WIRE), sweep: PACKED.node.d };
+// `construct` reads its skeleton from the document too, and its data has to
+// come from construct.js, which is the file that knows about connector trees.
+// A rig turned well off-axis, with one mass of each kind on it and a child of a
+// turned parent, so the quaternion composition, the cull and all four arms of
+// the kind dispatch are in play -- and so that `ext` is tested against a *posed*
+// box rather than an axis-aligned one, which is the case a rig can get wrong.
+const CN = (() => {
+  const m = { exports: {} };
+  new Function('module', readFileSync(join(HERE, 'construct.js'), 'utf8'))(m);
+  return m.exports;
+})();
+const RIG = CN.pack({ name: 'test rig', joints: [
+  { name: 'root', offset: [0, 0, -10],
+    mass: { kind: 'bone', len: 18, r0: 4, r1: 3, k: 0 } },
+  { name: 'chest', parent: 'root', offset: [0, 0, 14], rot: [0, 12, 0],
+    mass: { kind: 'ellipsoid', half: [7, 4.5, 6], offset: [0, 0, 1], k: 3 } },
+  { name: 'head', parent: 'chest', offset: [0, 0, 9], rot: [8, 0, 20],
+    mass: { kind: 'sphere', r: 4.5, k: 2 } },
+  { name: 'armL', parent: 'chest', offset: [3, 0, 4], rot: [0, 62, 15],
+    mass: { kind: 'bone', len: 13, r0: 2.4, r1: 1.5, k: 2.5 } },
+  { name: 'handL', parent: 'armL', offset: [0, 0, 13], rot: [0, 25, 0],
+    mass: { kind: 'box', half: [2.6, 1.2, 3.4], round: 0.9, k: 1.5 } },
+  { name: 'armR', parent: 'chest', offset: [-3, 0, 4], rot: [0, -62, -15],
+    mass: { kind: 'bone', len: 13, r0: 2.4, r1: 1.5, k: 2.5 } }
+] });
+SF.constructs = [RIG.construct];
+
+const DIMS = { wire: SF.wireExtent(TEST_WIRE), sweep: PACKED.node.d,
+               construct: RIG.node.d };
 
 let worstEver = 0, worstWho = '';
 

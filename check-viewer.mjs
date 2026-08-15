@@ -61,6 +61,13 @@ const SCENES = ['every primitive', 'booleans', 'two bodies, no blend across',
                 'sketch 2D, extruded', 'sketch 3D, extruded',
                 // one node, N round cones, blended into a block
                 'wire, tapered and blended',
+                // One node, a skeleton, and a pose that exists nowhere in the
+                // geometry -- the frames were composed by construct.js and the
+                // shader was handed the answer. check-glsl compares the two
+                // twins per point on a rig; this says the picture is right,
+                // which is where a bad `ext` on a *posed* rig would show,
+                // since posing is the one thing here that moves the bounds.
+                'construct — a posed rig',
                 // The two heaviest, and the last to arrive: a sweep's item is
                 // the largest of any slotted primitive, and these used to
                 // outlast the screenshot's own timeout on the software

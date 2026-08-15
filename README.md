@@ -13,6 +13,7 @@ STL output. Dependency-free JavaScript.
 | `sketch.js` | constrained 2D sketching → profiles → a 2D distance field |
 | `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
 | `sweep.js` | a section dragged along a sketch path, and `pack()` to make it a node |
+| `construct.js` | a skeleton of connectors → masses with resolved frames → a node |
 | `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
 | `demo3d.html` | the 3D sketcher, drawn rough and solved in front of you |
 
@@ -87,6 +88,13 @@ whichever model happened to use it. `profile` is in it too, drawing its default
 is a primitive nobody can see to fix, and `wire` is there on the same terms
 with its default tapered run. (`plane` and `field` sit it out: one is a
 half-space that would swallow the grid, the other needs real samples.)
+
+**construct — a posed rig** is the one that shows what a construct is for.
+Nothing in it was modelled in the pose it is drawn in: the rig is declared at
+rest and three connectors carry a `pose`, which `construct.js` composes down the
+chain. The elbow is the thing to look at — two round cones meeting at an angle
+with `smin` between them, so the crease deforms correctly at any bend and never
+has to be told how to.
 
 **wire, tapered and blended** is the one that shows why a wire is a primitive
 rather than a chain of capsules: a NURBS curve thickened 1.5 → 6.5 mm along its
@@ -297,10 +305,13 @@ to leave a hexagon a hexagon and a 90° arc a 90° arc. Ask `dimIsLength(t, i)`
 and `dimUnit(t, i)` rather than keeping your own list of exceptions.
 
 `exact: false` marks a primitive whose function is a safe *bound* rather than
-a true distance — currently only the ellipsoid. It matters more than it
-sounds: a raymarcher folds every shape into one `min`, so the loosest
-primitive in the library sets the step size for every ray in the scene.
-`check-primitives.mjs` prints the maximum safe step the set implies.
+a true distance — the ellipsoid, whose gradient exceeds one, and `construct`,
+whose blend shells leave it under one. It matters more than it sounds: a
+raymarcher folds every shape into one `min`, so the loosest primitive in the
+library sets the step size for every ray in the scene. `check-primitives.mjs`
+prints the maximum safe step the set implies. (A construct costs nothing there:
+rigid frames and exact masses leave it 1-Lipschitz, and the ellipsoid is still
+what sets the step.)
 
 ### One definition, two halves
 
@@ -331,10 +342,10 @@ The generator parses the subset of GLSL ES 3.0 the primitives actually use —
 outside that subset is a **parse error rather than a silent mistranslation**,
 which is the property that matters.
 
-**Nothing is excluded.** All sixteen primitives are generated, including the two
-that read data rather than computing from their dims. The one thing a shader and
-JavaScript genuinely cannot share is *how they reach that data* — one asks a
-sampler or reads an outline compiled into its own source, the other indexes an
+**Nothing is excluded.** All nineteen primitives are generated, including the
+ones that read data rather than computing from their dims. The one thing a
+shader and JavaScript genuinely cannot share is *how they reach that data* — one
+asks a sampler or reads items compiled into its own source, the other indexes an
 array — so those reads, and only those, are **intrinsics**: GLSL functions
 declared in `build-twins.mjs` to have a JS counterpart instead of being
 translated.
@@ -343,23 +354,29 @@ translated.
 | --- | --- |
 | `fieldSample(s, u, v, w)` | `sampleFieldUVW` — trilinear read of a `fields` grid |
 | `edgeCount(o)`, `edgeA(o, i)`, `edgeB(o, i)` | the flattened edges of a `profiles` outline |
+| `segCount(w)`, `segA`, `segB`, `segR` | the flattened segments of a `wires` path |
+| `swCount(s)`, `swA` … `swSect` | the packed items of a `sweeps` entry |
+| `conCount(c)`, `conCull` … `conMisc` | the packed items of a `constructs` rig |
 
 The handle a twin holds is the *resolved* data — the outline's edges, the
-wire's segments, the sweep's packed segments, with an empty slot already
-turned into the primitive's default — looked up once when the primitive is
-entered. That is what the shader holds too, since its items are compiled into
-the function before it runs.
+wire's segments, the sweep's packed segments, the construct's packed
+connectors, with an empty slot already turned into the primitive's default —
+looked up once when the primitive is entered. That is what the shader holds
+too.
 
-That is the whole seam, and it is two data reads wide. An undeclared intrinsic
-is an error, so it cannot widen by accident. Everything around them — the box
-union, the slab, the crossing count, the nearest-edge search — is ordinary GLSL
-and is generated like everything else.
+Each slotted primitive brings its own group of reads and nothing else does, so
+the seam is one group per data-carrying primitive and it widens only when one
+is added. An undeclared intrinsic is an error, so it cannot widen by accident.
+Everything around them — the box union, the slab, the crossing count, the
+nearest-edge search, the quaternion — is ordinary GLSL and is generated like
+everything else.
 
 ### Slotted primitives, and the second backend
 
-`profile` and `wire` have shapes that are *lists* — edges, segments — rather
-than three dims. Their canonical source is a **rolled loop** reading items
-through intrinsics, and that one source produces *both* derived forms:
+`profile`, `wire`, `sweep` and `construct` have shapes that are *lists* — edges,
+segments, connectors — rather than three dims. Their canonical source is a
+**rolled loop** reading items through intrinsics, and that one source produces
+*both* derived forms:
 
 ```
 GLSL.wire.src  ──build-twins──┬──▶  TWINS.wire        the JS twin
@@ -386,7 +403,34 @@ is why no default shape is written down in `glsl.js` — it used to be, in both
 files, and the copies could drift.
 
 `library()` skips any source marked `spec`, since a rolled one names an
-`outline`/`polyline` type GLSL does not have.
+`outline`/`polyline`/`rig` type GLSL does not have.
+
+#### Items as uniforms, when the numbers move
+
+Compiling the items into the function is what makes the unrolled reads free —
+both ends of every edge are literals, so a compiler folds the item's arithmetic
+away before it ever runs. That is right for a wire or a sweep, where the numbers
+*are* the geometry.
+
+It is wrong for a construct. A pose is different numbers in the same list, and
+recompiling a shader per frame is not a thing anyone can afford. So `slotDecls`
+takes an optional uniform name and emits indexed reads instead:
+
+```js
+GL.slotDecls('construct', items, n, 'uRig')   // uniform vec4 uRig[N]; + the reads
+GL.slotUniformData(items, n)                  // the Float32Array those reads expect
+```
+
+The *indices* stay literal, which is the part that matters: WebGL2 still never
+indexes an array dynamically, so the unrolling buys exactly what it was written
+to buy, and only the values move. One shader per rig **topology**; a new pose is
+a uniform upload. `slotFill` computes the layout for both halves, so the source's
+reads and the consumer's upload cannot disagree about which float is which.
+
+Every other slotted primitive is unaffected — omit the argument and the items
+are compiled in exactly as before. `check-glsl.mjs` runs a construct both ways
+against the same JS twin, because a construct has to mean the same shape whether
+or not it is posable.
 
 ### The fold
 
@@ -599,6 +643,104 @@ tens of seconds and unrolled ones in a few. A slot with no outline still emits
 a function that returns `1e9`, because the shader is generated from the plan
 and a node can name a profile that has not arrived yet — so changing an
 outline means recompiling, while moving the node does not.
+
+### Constructs (`construct.js`)
+
+Masses hung on a skeleton of **connectors**, folded with `smin`. It is the
+fourth slotted primitive and the last one whose shape is a list on the document,
+and it exists because the three-dims-and-a-round-slot budget every other
+primitive lives inside cannot describe an assembly — a figure, a linkage, an
+armature — let alone a *posed* one.
+
+```js
+const { construct, node } = SinterConstruct.pack(rig);
+SinterForm.constructs = [construct];        // getter/setter, same rule as fields
+```
+
+A **connector is a joint**: a parent, an offset in the parent's frame, a rest
+rotation, a pose rotation, and the mass it wears.
+
+```js
+{ name: 'elbow', parent: 'shoulder', offset: [0, 0, 30],
+  rot: [0, 0, 0], pose: [0, -55, 0],
+  mass: { kind: 'bone', len: 26, r0: 4.6, r1: 3.2, k: 3.5 } }
+```
+
+That is the object an animation keyframes — you rotate a joint, not a bone — and
+since every bone has exactly one proximal joint, making the joint the object
+costs nothing and gives the keyframe an owner. A connector with no `mass` is a
+pure articulation and contributes no item; parents must be declared before their
+children, which is what makes one forward pass enough.
+
+Four kinds of mass, each of them a primitive the library already believes in:
+
+| kind | is | for |
+| --- | --- | --- |
+| `bone` | a round cone — `len`, `r0`, `r1` | limbs, necks, digits |
+| `ellipsoid` | `half: [a, b, c]` | torso masses |
+| `sphere` | `r` | heads, joint balls |
+| `box` | `half: [a, b, c]`, `round` | feet, paddle hands |
+
+Each also takes `k` (its blend radius into the running fold) and its own
+`offset`/`rot` within the connector's frame, so a thorax can be centred up the
+spine rather than at its base.
+
+#### The tree is walked here, not in the evaluator
+
+`pack()` composes each connector's transform down the chain and emits one item
+per mass carrying **its own resolved frame** — the same division `sweep.js`
+makes, and for the same reason: transport is a global property of the skeleton
+and an SDF is local. So the primitive sees a flat list with no hierarchy, no
+recursion and nothing indexed dynamically.
+
+That is what makes a pose cheap. Posing is a repack: twenty joints of quaternion
+composition, microseconds, and the topology does not change — so with items
+arriving as uniforms (above) the shader compiles once per skeleton and a new
+pose is an upload. Animation is that, per frame.
+
+Frames are carried as unit quaternions, stored already **inverted**, because
+what a mass wants is its own local point: `local = R'(p - o)`. Four floats
+rather than a matrix's nine matters when an item is read out of a uniform block
+that is somebody's whole budget, and a timeline will want to slerp them.
+
+#### Rigid motions only
+
+Every connector transform is a rotation and a translation. `pack()` **refuses**
+a scaled connector rather than letting it through, because a scaled frame does
+not preserve distance: the primitive would go on returning numbers, the
+raymarcher would go on stepping by them, and it would overshoot. A mass that
+wants to be bigger says so in its own dims — the dims are the shape, the frame
+is only where the shape is.
+
+That constraint is what keeps a construct **1-Lipschitz**, which
+`check-primitives` measures at exactly 1.0. It is still `exact: false`, because
+every joint folds with `smin` and inside a blend shell the gradient is under one
+— it is a bound, and it says so.
+
+#### Why this is not a skinned mesh
+
+There are no weights here and no skin to bind. The join between two masses *is*
+`smin`, evaluated at the sample, so a rotated joint deforms correctly by
+construction — no candy-wrapper twist, no interpenetration at the elbow, and the
+result is watertight and printable at **any** pose. That is the reason to rig a
+solid this way instead of a surface.
+
+#### The cull, and the one thing that nearly broke it
+
+Each item leads with a bounding sphere, so a connector that cannot beat what has
+already been found is answered in four reads instead of seventeen —
+`check-construct` measures it skipping about half of all connector visits on a
+six-connector rig. Skipping is exact: `smin(best, dd, k)` is `best` whenever
+`dd >= best + k`, and the `k` is already inside the packed radius.
+
+Exact *provided* a mass never reports less than the distance to its own bounding
+sphere — and the ellipsoid does. Its function is iq's bound rather than its
+distance, and an anisotropic bound falls behind the true distance without limit
+as you go out, so no sphere is large enough to make the implication hold. This
+was not a radius to enlarge. What fixes it is that the ball distance is *itself*
+a valid under-estimate, so the greater of the two is one as well: taking
+`max(mass, ballDistance)` makes the premise true by construction, costs a `max`,
+and tightens the ellipsoid's far field on the way past.
 
 ### Meshing on the GPU (`glmesh.js`)
 
@@ -949,7 +1091,7 @@ happened once already. `check-kernel.mjs` asserts it.
 
 ## Tests
 
-Three, each answering a different question. All exit 0 or 1.
+Each answering a different question. All exit 0 or 1.
 
 ### `check-kernel.mjs` — is the seam intact?
 
@@ -980,6 +1122,33 @@ The last two are the ones that bite quietly. A primitive that over-estimates
 distance looks perfectly fine on screen and makes the marcher tunnel through
 thin features *somewhere else in the scene*. The run ends by printing the
 loosest primitive and the maximum safe raymarch step it implies.
+
+### `check-construct.mjs` — is the packing what the skeleton said?
+
+```
+node check-construct.mjs
+```
+
+`check-primitives` asks whether the primitive is a distance function and
+`check-glsl` asks whether its twins agree; neither can ask this one, because
+both take the packed items as given.
+
+That is where a rig goes wrong, and every failure mode is quiet — a rotation
+composed in the other order, a pose applied before its rest instead of after, an
+offset resolved in the child's frame, a quaternion stored the right way round
+and applied the wrong way. All of them draw a solid, and one that is watertight,
+printable and slightly wrong. So: one mass alone is *exactly* the library
+primitive it is made of (which is the only thing holding `construct.js`'s copy
+of a round cone against the one in `wire` it was copied from); a turned
+connector agrees with the kernel's own `invRot` on the same Euler angles; rest
+20° plus pose 35° is rest 55°; a scaled connector is refused; culling changes the
+cost and never the answer; and `ext` still contains the solid — tightly — across
+two dozen random poses.
+
+The tightness half of that last one is not decoration. It is what caught a
+`massExtent` that used a bone's full length where its half-length belonged: the
+box still contained the solid, so no containment check anywhere would have said
+a word, and every mesh of every rig would have been quietly oversized.
 
 ### `check-viewer.mjs` — does the viewer work, and do the halves agree in the large?
 

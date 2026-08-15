@@ -411,6 +411,96 @@ float pSweep(sweeppath w, vec3 p, vec3 d, float r){
   float da = (ins ? -1.0 : 1.0)*sqrt(dd);
   float db = abs(p.z) - d.z;
   return min(max(da, db), 0.0) + length(max(vec2(da, db), 0.0));
+}` },
+
+  // A construct: masses hung on a skeleton of connectors, folded with smin.
+  //
+  // The skeleton is not here. construct.js walks the tree once and hands over
+  // a flat list in which every item already carries its own resolved frame --
+  // the same division sweep.js makes, and for the same reason: composing
+  // parents is a global property of the rig and this is a local evaluation. So
+  // there is no hierarchy in this loop, no recursion, and nothing indexed
+  // dynamically. A pose is different numbers in the same list.
+  //
+  // The frame arrives as a unit quaternion, already inverted, because what a
+  // mass wants is its own local point: local = R'(p - o). Inverting a unit
+  // quaternion is a sign flip on three floats, so construct.js does it once
+  // per pack instead of once per sample per item, and the shader applies it
+  // with the standard two-cross-product form. Four floats rather than a 3x3's
+  // nine is worth it here: an item is read out of a uniform block whose size
+  // is the consumer's whole budget, and a timeline will want to slerp them.
+  //
+  // Every transform is rigid. That is not a convention, it is what keeps this
+  // a distance function -- construct.js refuses a scaled connector rather than
+  // let the marcher step by a number that is too big.
+  //
+  // The cull is sweep's, for the same payoff: a bounding sphere first, so a
+  // connector that cannot beat what has already been found is answered in four
+  // reads instead of seventeen. smin(best, dd, k) is best whenever
+  // dd >= best + k, and the k is already inside the radius construct.js packed,
+  // so skipping is exact -- it changes the cost and never the answer.
+  //
+  // Exact *provided* a mass never reports less than the distance to its own
+  // bounding sphere, and one of them does. An ellipsoid's is iq's bound rather
+  // than its distance, and an anisotropic bound falls behind the true distance
+  // without limit as you go out: no sphere is large enough to make the
+  // implication hold, so this was not a radius to enlarge. What fixes it is
+  // that the ball distance is *itself* a valid under-estimate -- the mass is
+  // inside the ball -- so the greater of the two is one as well, and taking it
+  // makes the premise true by construction. It costs a `max` and it tightens
+  // the ellipsoid's far field on the way past, which the marcher is glad of.
+  construct: { fn: 'pConstruct', slotted: true, spec: true,
+    src: `float constructMass(float kind, vec3 q, vec3 dm, float tip){
+  if (kind < 0.5) {
+    float r0 = dm.x;
+    float h = dm.z;
+    float sl = (r0 - tip)/h;
+    float a2 = 1.0 - sl*sl;
+    // One ball swallowing the other leaves no tangent cone between them and
+    // the hull is just the larger ball -- the same degenerate case a wire's
+    // round cone guards, reachable here by tapering a short bone hard.
+    if (a2 <= 0.0) return min(length(q) - r0, length(q - vec3(0.0, 0.0, h)) - tip);
+    float a = sqrt(a2);
+    vec2 w = vec2(length(q.xy), q.z);
+    float t = dot(w, vec2(-sl, a));
+    if (t < 0.0) return length(w) - r0;
+    if (t > a*h) return length(w - vec2(0.0, h)) - tip;
+    return dot(w, vec2(a, sl)) - r0;
+  }
+  if (kind < 1.5) {
+    vec3 rr = max(dm, vec3(1e-3));
+    float k0 = length(q/rr);
+    float k1 = length(q/(rr*rr));
+    if (k1 < 1e-6) return -min(rr.x, min(rr.y, rr.z));
+    return k0*(k0 - 1.0)/k1;
+  }
+  if (kind < 2.5) return length(q) - dm.x;
+  vec3 e = max(dm - tip, vec3(0.0));
+  vec3 g = abs(q) - e;
+  return length(max(g, 0.0)) + min(max(g.x, max(g.y, g.z)), 0.0) - tip;
+}
+
+float pConstruct(rig c, vec3 p, vec3 d, float r){
+  float best = 1e18;
+  int n = conCount(c);
+  for (int i = 0; i < n; i++) {
+    vec3 bc = conCull(c, i);
+    float br = conCullR(c, i);
+    float bd = length(p - bc) - br;
+    if (bd < best) {
+      vec3 org = conOrg(c, i);
+      vec3 qv = conQ(c, i);
+      float qw = conQW(c, i);
+      vec3 dm = conMass(c, i);
+      vec3 ms = conMisc(c, i);
+      vec3 pa = p - org;
+      vec3 t = vec3(qv.y*pa.z - qv.z*pa.y, qv.z*pa.x - qv.x*pa.z, qv.x*pa.y - qv.y*pa.x);
+      vec3 lp = pa + (t*qw + vec3(qv.y*t.z - qv.z*t.y, qv.z*t.x - qv.x*t.z,
+                                  qv.x*t.y - qv.y*t.x))*2.0;
+      best = smin(best, max(constructMass(ms.x, lp, dm, ms.y), bd + ms.z), ms.z);
+    }
+  }
+  return best;
 }` }
 };
 
@@ -572,19 +662,49 @@ const UNROLL = {
     pre: "  float dd = 1e18;\n  bool ins = false;",
     macro: "#define ITEM(EDGEA, EDGEB) {\\\n  vec2 A = EDGEA; \\\n  vec2 B = EDGEB; \\\n  vec2 e = (B - A); \\\n  vec2 w = (p.xy - A); \\\n  vec2 q = (w - (e * clamp((dot(w, e) / dot(e, e)), 0.0, 1.0))); \\\n  dd = min(dd, dot(q, q)); \\\n  bool c1 = (p.y >= A.y); \\\n  bool c2 = (p.y < B.y); \\\n  float cr = ((e.x * w.y) - (e.y * w.x)); \\\n  if ((((c1 && c2) && (cr > 0.0)) || (((!c1) && (!c2)) && (cr < 0.0)))) { \\\n    ins = (!ins); \\\n  } }\n",
     post: "  float da = ((ins ? (-1.0) : 1.0) * sqrt(dd));\n  float db = (abs(p.z) - d.z);\n  return (min(max(da, db), 0.0) + length(max(vec2(da, db), 0.0)));"
+  },
+  construct: {
+    fn: "pConstruct", stride: 17, arity: [3, 1, 3, 3, 1, 3, 3],
+    helpers: "float constructMass(float kind, vec3 q, vec3 dm, float tip){\n  if ((kind < 0.5)) {\n    float r0 = dm.x;\n    float h = dm.z;\n    float sl = ((r0 - tip) / h);\n    float a2 = (1.0 - (sl * sl));\n    if ((a2 <= 0.0)) {\n      return min((length(q) - r0), (length((q - vec3(0.0, 0.0, h))) - tip));\n    }\n    float a = sqrt(a2);\n    vec2 w = vec2(length(q.xy), q.z);\n    float t = dot(w, vec2((-sl), a));\n    if ((t < 0.0)) {\n      return (length(w) - r0);\n    }\n    if ((t > (a * h))) {\n      return (length((w - vec2(0.0, h))) - tip);\n    }\n    return (dot(w, vec2(a, sl)) - r0);\n  }\n  if ((kind < 1.5)) {\n    vec3 rr = max(dm, vec3(1e-3));\n    float k0 = length((q / rr));\n    float k1 = length((q / (rr * rr)));\n    if ((k1 < 1e-6)) {\n      return (-min(rr.x, min(rr.y, rr.z)));\n    }\n    return ((k0 * (k0 - 1.0)) / k1);\n  }\n  if ((kind < 2.5)) {\n    return (length(q) - dm.x);\n  }\n  vec3 e = max((dm - tip), vec3(0.0));\n  vec3 g = (abs(q) - e);\n  return ((length(max(g, 0.0)) + min(max(g.x, max(g.y, g.z)), 0.0)) - tip);\n}\n",
+    pre: "  float best = 1e18;",
+    macro: "#define ITEM(CONCULL, CONCULLR, CONORG, CONQ, CONQW, CONMASS, CONMISC) {\\\n  vec3 bc = CONCULL; \\\n  float br = CONCULLR; \\\n  float bd = (length((p - bc)) - br); \\\n  if ((bd < best)) { \\\n    vec3 org = CONORG; \\\n    vec3 qv = CONQ; \\\n    float qw = CONQW; \\\n    vec3 dm = CONMASS; \\\n    vec3 ms = CONMISC; \\\n    vec3 pa = (p - org); \\\n    vec3 t = vec3(((qv.y * pa.z) - (qv.z * pa.y)), ((qv.z * pa.x) - (qv.x * pa.z)), ((qv.x * pa.y) - (qv.y * pa.x))); \\\n    vec3 lp = (pa + (((t * qw) + vec3(((qv.y * t.z) - (qv.z * t.y)), ((qv.z * t.x) - (qv.x * t.z)), ((qv.x * t.y) - (qv.y * t.x)))) * 2.0)); \\\n    best = smin(best, max(constructMass(ms.x, lp, dm, ms.y), (bd + ms.z)), ms.z); \\\n  } }\n",
+    post: "  return best;"
   }
 };
 
 // One slot's function. `items` is what SinterForm.slotItems returned for it.
-function slotDecl(key, i, items) {
+//
+// `uniform` is what makes a *pose* different from a *shape*. Without it the
+// item data is compiled straight into the function as literals, which is what
+// a wire or a sweep wants: the numbers are the geometry, and a compiler that
+// can see them folds the item's arithmetic away before it ever runs. A
+// construct's numbers change every frame an animation runs, and recompiling a
+// shader per frame is not a thing anyone can afford -- so the literals become
+// reads out of a uniform array instead. The *indices* stay literal, which is
+// the part that matters: WebGL2 still never indexes an array dynamically, so
+// the unrolling buys what it was written to buy, and only the values move.
+function slotDecl(key, i, items, uniform) {
   const U = UNROLL[key];
   if (!U) throw new Error('not a slotted primitive: ' + key);
   const f = (v) => (Number.isFinite(v) ? v : 0).toPrecision(8);
+  const nm = uniform && uniform.name;
+  const rd = (j) => nm + '[' + (j >> 2) + '].' + 'xyzw'[j & 3];
+  // components landing inside one vec4 are a swizzle rather than a
+  // constructor: the same reads, a third of the source
+  const grp = (j, w) => {
+    if (w === 1) return rd(j);
+    if ((j & 3) + w <= 4)
+      return nm + '[' + (j >> 2) + '].' + 'xyzw'.slice(j & 3, (j & 3) + w);
+    const c = [];
+    for (let m = 0; m < w; m++) c.push(rd(j + m));
+    return 'vec' + w + '(' + c.join(',') + ')';
+  };
   let body = '';
   for (let o = 0; o + U.stride <= items.length; o += U.stride) {
     const args = [];
     let k = o;
     for (const w of U.arity) {
+      if (uniform) { args.push(grp(uniform.base + k, w)); k += w; continue; }
       const c = [];
       for (let j = 0; j < w; j++) c.push(f(items[k++]));
       args.push(w === 1 ? c[0] : `vec${w}(${c.join(',')})`);
@@ -607,11 +727,41 @@ ${U.post}
 // document has not filled in yet, and an undeclared function is a compile
 // error rather than an empty shape -- so the caller passes one `items` array
 // per slot, and SinterForm.slotItems turns an absent entry into the default.
-function slotDecls(key, itemsPerSlot, count) {
-  const n = Math.max(count | 0, (itemsPerSlot || []).length, 1);
-  let s = '';
-  for (let i = 0; i < n; i++) s += slotDecl(key, i, (itemsPerSlot || [])[i] || []);
+//
+// `uniform`, when given, is the name of the vec4 array the items are read out
+// of, and the declaration comes back with them. Feed it with slotUniformData.
+function slotDecls(key, itemsPerSlot, count, uniform) {
+  const F = slotFill(itemsPerSlot, count);
+  const u = typeof uniform === 'string' ? { name: uniform } : uniform;
+  let s = u ? 'uniform vec4 ' + u.name + '[' + F.vec4s + '];\n' : '';
+  for (let i = 0; i < F.list.length; i++)
+    s += slotDecl(key, i, F.list[i], u ? { name: u.name, base: F.bases[i] } : null);
   return s;
+}
+
+// One slot list, padded out to the slot count a shader has to be able to name,
+// and where each slot's items begin in the flat uniform array. Both the
+// source's reads and the consumer's upload come through here, so the two
+// cannot disagree about which float is which -- the same reason the shape
+// layout lives in this file rather than in whoever packs it.
+function slotFill(itemsPerSlot, count) {
+  const n = Math.max(count | 0, (itemsPerSlot || []).length, 1);
+  const list = [];
+  for (let i = 0; i < n; i++) list.push((itemsPerSlot || [])[i] || []);
+  const bases = [];
+  let f = 0;
+  for (const it of list) { bases.push(f); f += it.length; }
+  return { list, bases, floats: f, vec4s: Math.max(Math.ceil(f / 4), 1) };
+}
+
+// The numbers those reads expect, in that layout, padded to whole vec4s. A
+// consumer uploads this and nothing else.
+function slotUniformData(itemsPerSlot, count) {
+  const F = slotFill(itemsPerSlot, count);
+  const out = new Float32Array(F.vec4s * 4);
+  let n = 0;
+  for (const it of F.list) for (let j = 0; j < it.length; j++) out[n++] = it[j];
+  return out;
 }
 // >>> generated unrollers
 
@@ -723,6 +873,7 @@ function packPlan(at, opts) {
 
 const SinterFormGLSL = { GLSL, FOLD, FOLD_TWINS, foldSource, sectionPolyDecl,
                          library, call, samplerDecls, slotBlock, slotDecls, slotDecl,
+                         slotFill, slotUniformData,
                          sceneBody, mapSource, maxSlot, packPlan,
                          KEYS: Object.keys(GLSL) };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterFormGLSL;

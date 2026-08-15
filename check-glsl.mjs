@@ -233,6 +233,89 @@ const cases = KEYS.map(k => {
   }
 }
 
+// `construct`: masses on a skeleton, and the only primitive whose items reach
+// the shader as *uniforms* instead of as literals compiled into its function.
+// So there are two things to hold together here rather than one -- the
+// unrolled body against the rolled loop, as for every other slotted primitive,
+// and the indexed reads against the layout `slotUniformData` uploads. Get the
+// second wrong by one float and every frame is a slightly different shape.
+//
+// The test rig turns connectors well off-axis and hangs one of each kind on
+// them, because an axis-aligned rig is exactly the rig a wrong quaternion
+// still draws correctly. The child of a turned parent is what catches a
+// composition done in the other order.
+{
+  const cmod = { exports: {} };
+  new Function('module', readFileSync(join(HERE, 'construct.js'), 'utf8'))(cmod);
+  const CN = cmod.exports;
+  const rig = { name: 'test rig', joints: [
+    { name: 'root', offset: [0, 0, -10],
+      mass: { kind: 'bone', len: 18, r0: 4, r1: 3, k: 0 } },
+    { name: 'chest', parent: 'root', offset: [0, 0, 14], rot: [0, 12, 0],
+      mass: { kind: 'ellipsoid', half: [7, 4.5, 6], offset: [0, 0, 1], k: 3 } },
+    { name: 'head', parent: 'chest', offset: [0, 0, 9], rot: [8, 0, 20],
+      mass: { kind: 'sphere', r: 4.5, k: 2 } },
+    { name: 'armL', parent: 'chest', offset: [3, 0, 4], rot: [0, 62, 15],
+      mass: { kind: 'bone', len: 13, r0: 2.4, r1: 1.5, k: 2.5 } },
+    { name: 'handL', parent: 'armL', offset: [0, 0, 13], rot: [0, 25, 0],
+      mass: { kind: 'box', half: [2.6, 1.2, 3.4], round: 0.9, k: 1.5 } },
+    { name: 'armR', parent: 'chest', offset: [-3, 0, 4], rot: [0, -62, -15],
+      mass: { kind: 'bone', len: 13, r0: 2.4, r1: 1.5, k: 2.5 } }
+  ] };
+  const packed = CN.pack(rig);
+  SF.constructs = [packed.construct];
+  const d = packed.node.d;
+  const items = [SF.slotItems('construct', packed.construct)];
+  const pts = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.5;
+    pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 1.8;
+    pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 1.4;
+  }
+  cases.push({ key: 'construct', fn: 'pConstruct0',
+               glsl: GL.slotDecls('construct', items, 1, 'uRig'),
+               fold: GL.foldSource(),
+               uniform: { name: 'uRig',
+                          data: Array.from(GL.slotUniformData(items, 1)) },
+               name: SF.PRIMS.construct.name, d, r: 0, slotted: true, pts,
+               js: (p, dd, r) => {
+                 SF.constructs = [packed.construct];
+                 return SF.PRIMS.construct.js(p, dd, r, { fi: 0 });
+               } });
+
+  // The same rig with its items compiled in as literals, which is the mode
+  // every other slotted primitive uses. Both paths have to draw the same
+  // shape, or a construct means one thing when it is posable and another when
+  // it is not.
+  cases.push({ key: 'constructLiteral', fn: 'pConstruct0',
+               glsl: GL.slotDecls('construct', items, 1),
+               fold: GL.foldSource(),
+               name: 'Construct (compiled-in items)', d, r: 0, slotted: true, pts,
+               js: (p, dd, r) => {
+                 SF.constructs = [packed.construct];
+                 return SF.PRIMS.construct.js(p, dd, r, { fi: 0 });
+               } });
+}
+
+// An empty construct slot, which is the default armature -- the same reason
+// the wire and profile defaults are checked: that shape is written down once
+// in the kernel and this is what stops the shader's copy of it drifting.
+{
+  const d = SF.PRIMS.construct.def;
+  const items = [SF.slotItems('construct', undefined)];
+  const pts = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    pts[4 * i] = (rnd() * 2 - 1) * d[0] * 1.5;
+    pts[4 * i + 1] = (rnd() * 2 - 1) * d[1] * 2.0;
+    pts[4 * i + 2] = (rnd() * 2 - 1) * d[2] * 1.3;
+  }
+  cases.push({ key: 'constructDefault', fn: 'pConstruct0',
+               glsl: GL.slotDecls('construct', items, 1),
+               fold: GL.foldSource(),
+               name: 'Construct (empty slot → default)', d, r: 0, slotted: true,
+               js: (p, dd, r) => SF.PRIMS.construct.js(p, dd, r, { fi: 99 }), pts });
+}
+
 // And `field`, which until now was the only primitive with no per-point check
 // at all -- the loop skips it as baked, and its two halves reach the samples
 // by genuinely different routes: the shader asks the sampler hardware, the JS
@@ -293,6 +376,7 @@ uniform sampler2D uPts;
 uniform vec3 uD;
 uniform float uR;
 ${c.sampler ? 'precision highp sampler3D;\nuniform sampler3D uF;' : ''}
+${c.fold ? c.fold : ''}
 ${c.glsl}
 void main(){
   vec3 p = texelFetch(uPts, ivec2(gl_FragCoord.xy), 0).xyz;
@@ -337,6 +421,14 @@ void main(){
     gl.uniform1i(gl.getUniformLocation(prog, 'uPts'), 0);
     gl.uniform3f(gl.getUniformLocation(prog, 'uD'), c.d[0] || 0, c.d[1] || 0, c.d[2] || 0);
     gl.uniform1f(gl.getUniformLocation(prog, 'uR'), c.r);
+    // A construct's items arrive as uniforms rather than as literals compiled
+    // into the source, which is the whole point of it: a pose has to change
+    // without a recompile. `slotUniformData` is the only thing that knows the
+    // layout those indexed reads expect, so this uploads exactly that and
+    // nothing of its own.
+    if (c.uniform)
+      gl.uniform4fv(gl.getUniformLocation(prog, c.uniform.name),
+                    new Float32Array(c.uniform.data));
     // the same layout viewer.js uploads: nz wide by ny by nx, trilinear,
     // edges clamped, which is what the JS twin's interpolation assumes
     if (c.sampler) {

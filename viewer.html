@@ -97,6 +97,7 @@
 <script src="sketch.js"></script>
 <script src="sketch3d.js"></script>
 <script src="sweep.js"></script>
+<script src="construct.js"></script>
 <script src="glmesh.js"></script>
 <script src="viewer.js"></script>
 <script>
@@ -266,6 +267,37 @@ const SCENES = {
       N('box', { p: [0, 0, 6], d: [70, 46, 12], round: 3, k: 5 }),
       N('wire', node)
     ] }];
+  },
+
+  // Masses hung on a skeleton of connectors, blended where they meet. One
+  // node, and the interesting part is what is *not* in it: no joint of this
+  // arm is a shape of its own, and nothing here was modelled in the pose it is
+  // drawn in. The rig is declared at rest and `pose` turns three connectors --
+  // shoulder, elbow, wrist -- and construct.js composes that down the chain.
+  //
+  // The elbow is the thing to look at. It is two round cones meeting at an
+  // angle with `smin` between them, so the crease deforms correctly at any
+  // bend, stays watertight, and never has to be told how to: an SDF rig has no
+  // skin to bind and no weights to paint, which is the whole reason to rig a
+  // solid this way rather than a surface.
+  'construct — a posed rig': () => {
+    const bend = -55, lift = 35;
+    const { construct, node } = SinterConstruct.pack({ name: 'arm', joints: [
+      { name: 'torso', offset: [0, 0, -6],
+        mass: { kind: 'ellipsoid', half: [15, 9, 20], offset: [0, 0, 8], k: 4 } },
+      { name: 'shoulder', parent: 'torso', offset: [13, 0, 22],
+        rot: [0, 90, 0], pose: [0, lift, 0],
+        mass: { kind: 'sphere', r: 7, k: 5 } },
+      { name: 'upperArm', parent: 'shoulder', offset: [0, 0, 0],
+        mass: { kind: 'bone', len: 30, r0: 6, r1: 4.6, k: 5 } },
+      { name: 'elbow', parent: 'shoulder', offset: [0, 0, 30], pose: [0, bend, 0],
+        mass: { kind: 'bone', len: 26, r0: 4.6, r1: 3.2, k: 3.5 } },
+      { name: 'wrist', parent: 'elbow', offset: [0, 0, 26], pose: [0, 0, 25],
+        mass: { kind: 'box', half: [4.4, 2.2, 6], round: 1.8, k: 3 } }
+    ] });
+    SinterForm.constructs = [construct];
+    node.p[2] += 30;
+    return [{ id: 0, nodes: [N('construct', node)] }];
   },
 
   // A rectangular section dragged along a sketched curve through space, growing
