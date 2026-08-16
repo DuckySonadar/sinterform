@@ -133,7 +133,12 @@ function massData(m) {
       const len = num(m.len, 'bone len');
       if (r0 <= 0 || r1 <= 0 || len <= 0)
         throw new Error('a bone wants len > 0 and radii > 0');
-      return { kind, dims: [r0, 0, len], tip: r1 };
+      // `aspect` is the cross-section's second radius as a ratio of the first,
+      // so 1 is a round bone and anything else is an elliptical one. It rides
+      // in the dim a bone has no other use for.
+      const asp = m.aspect === undefined ? 1 : num(m.aspect, 'bone aspect');
+      if (asp <= 0) throw new Error('a bone wants aspect > 0');
+      return { kind, dims: [r0, asp, len], tip: r1 };
     }
     case 1:
       if (!(h[0] > 0 && h[1] > 0 && h[2] > 0))
@@ -166,7 +171,10 @@ function num(v, what) {
 function massBall(md) {
   const [a, b, c] = md.dims;
   switch (md.kind) {
-    case 0: return { c: [0, 0, c * 0.5], r: c * 0.5 + Math.max(a, md.tip) };
+    // an elliptical bone reaches `aspect` times its radius on the second axis,
+    // so the ball has to allow for whichever axis is the wider one
+    case 0: return { c: [0, 0, c * 0.5],
+                     r: c * 0.5 + Math.max(a, md.tip) * Math.max(b, 1) };
     case 1: return { c: [0, 0, 0], r: Math.max(a, Math.max(b, c)) };
     case 2: return { c: [0, 0, 0], r: a };
     default: return { c: [0, 0, 0], r: Math.hypot(a, b, c) };
@@ -194,12 +202,16 @@ function massExtent(md, q) {
     } else if (md.kind === 2) {
       out[k] = a;
     } else {
-      // Two balls, and the extent is measured about the point between them --
-      // so it is *half* the length that projects onto the axis, and the larger
-      // of the two radii, not the tip's. Getting either wrong leaves a box
-      // that still contains the solid and is loose by centimetres, which no
+      // A bone is the convex hull of its two end caps, and a hull's support
+      // function is the greater of theirs -- so its box is the union of their
+      // boxes, exactly. The caps are ellipsoids of semi-axes (r, r*aspect, r),
+      // and the extent is measured about the point between them, so it is
+      // *half* the length that projects onto the axis. Using the whole length,
+      // or the tip's radius rather than the larger one, leaves a box that
+      // still contains the solid and is loose by centimetres -- which no
       // containment check would ever notice.
-      out[k] = Math.abs(R[2]) * c * 0.5 + Math.max(a, md.tip);
+      const cap = (r) => Math.hypot(R[0] * r, R[1] * r * b, R[2] * r);
+      out[k] = Math.abs(R[2]) * c * 0.5 + Math.max(cap(a), cap(md.tip));
     }
   }
   return out;

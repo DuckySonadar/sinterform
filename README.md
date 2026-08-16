@@ -90,7 +90,7 @@ is a primitive nobody can see to fix, and `wire` is there on the same terms
 with its default tapered run. (`plane` and `field` sit it out: one is a
 half-space that would swallow the grid, the other needs real samples.)
 
-**mannequin** is a whole figure as one node: twenty-one connectors, every
+**mannequin** is a whole figure as one node: forty-three connectors, every
 proportion in it out of the table in `figure.js` rather than out of anybody's
 eye.
 
@@ -681,7 +681,7 @@ Four kinds of mass, each of them a primitive the library already believes in:
 
 | kind | is | for |
 | --- | --- | --- |
-| `bone` | a round cone — `len`, `r0`, `r1` | limbs, necks, digits |
+| `bone` | a round cone — `len`, `r0`, `r1`, `aspect` | limbs, necks, digits |
 | `ellipsoid` | `half: [a, b, c]` | torso masses |
 | `sphere` | `r` | heads, joint balls |
 | `box` | `half: [a, b, c]`, `round` | feet, paddle hands |
@@ -689,6 +689,16 @@ Four kinds of mass, each of them a primitive the library already believes in:
 Each also takes `k` (its blend radius into the running fold) and its own
 `offset`/`rot` within the connector's frame, so a thorax can be centred up the
 spine rather than at its base.
+
+A bone's `aspect` is its cross-section's second radius as a ratio of the first,
+so 1 is a round bone and anything else is an elliptical one. It matters more
+than it sounds: a wrist is 55 mm across and 40 through, and a figure built from
+circular bones reads as tubing however good its proportions are. The point is
+divided by the ratio and the answer multiplied by the smaller scale, which is
+the standard way to make an anisotropic shape out of an isotropic one and stay
+1-Lipschitz — the gradient picks up 1/min(scale) and the factor takes it
+straight back out. Like the ellipsoid it is then a bound rather than a distance,
+and the bounding-sphere clamp below catches it.
 
 #### The tree is walked here, not in the evaluator
 
@@ -791,9 +801,13 @@ figure — correct proportions and correct masses, and no features. No face, no
 fingers or toes, no explicit anatomy. `figure` moves the silhouette the way a
 dress form does and there is nothing else there to find.
 
-#### Two things a figure needs that a skeleton does not obviously imply
+#### The masses, and why each one is there
 
-A **shoulder girdle**. The first version had a hand's breadth of clear air
+Forty-three connectors. Every mass in the table earns its place by being
+visible in its absence, which is also how `check-figure.mjs` tests them — delete
+one and exactly one assertion goes red.
+
+**A shoulder girdle.** The first version had a hand's breadth of clear air
 between each deltoid and the chest, because a thorax ellipsoid is at its widest
 around the nipple line and has tapered nearly to a point by shoulder height —
 so the arms hung off nothing. What fixes it is the mass a clavicle and a
@@ -801,17 +815,49 @@ trapezius actually put there: one capsule laid across the top of the thorax,
 ending at each shoulder joint, so everything from sternum to arm is one blended
 run. It is why a figure built from a torso and two arms never looks right.
 
-**Three masses up the trunk**, not one: a pelvis, a waist and a thorax, with
-the blends between them doing what a single ellipsoid cannot. A body's
-silhouette is that pair of curves, and it is the first thing missing when a
-figure reads as a doll.
+**Five masses up the trunk**, not one — pelvis, glutes, waist, belly, thorax,
+plus a sternum and pectorals across the front and a latissimus up each side.
+A body's silhouette is the run of curves between them, and it is the first
+thing missing when a figure reads as a doll.
+
+**A gastrocnemius.** The single most visible omission on a leg: without it the
+back of the shank runs straight from knee to ankle and the whole leg reads as a
+chair leg. The same argument puts a quadriceps high and in front of the thigh,
+a biceps a third of the way down the upper arm, and a flexor bulge a quarter of
+the way down the forearm — a limb is thickest along its segments, not at its
+joints.
+
+**A skull and a jaw**, not an ovoid. An ellipsoid as tall as a whole head comes
+to a point at the crown; a nearly-round cranium with a jaw hung off the front of
+it reads as a head from any angle. The blends here are the smallest in the
+table, because a neck is the one place where a generous radius costs the whole
+landmark — smear the head into the trapezius and there is no neck at all.
+
+**A deltoid that caps the shoulder from below the acromion.** Centred *on* the
+joint it rises into a pair of peaks and the figure wears shoulder pads.
+
+**A spinal S.** The trunk's links tilt — pelvis forward, a lumbar hollow above
+it, a thoracic curve back, a neck that brings the head over the feet again — and
+the angles sum to zero so the head ends up where the canon says. It is a pose
+parameter (`spine`), so it can be turned off.
+
+Two things fall out of that curve and both were wrong first. A rise stated as a
+height has to be divided by the cosine of the tilt it climbs at, or every
+landmark above it drifts down — under a percent, which is more than the four
+thousandths of stature the canon is checked to. And **a limb has to undo the
+lean of whatever it hangs from**: arms and legs are vertical in the anatomical
+position however the spine is curved, so the shoulder and the hip cancel the
+trunk's tilt rather than inheriting it. A leg that inherits seven degrees of
+pelvic tilt swings its foot four inches forward and takes the figure's whole
+sagittal box with it.
 
 One caution that falls out of the construct's design rather than this file's: a
 node folds every mass with `smin` against the *running* distance, so a blend
 radius blends with everything already found, not only with the neighbour it was
 meant for. A generous blend on the thigh fills the hip crease and also fuses
 the two thighs to each other further down the leg than they should be. The
-lever is the radius.
+lever is the radius, which is why the blends between masses that sit near their
+opposite number — thighs, glutes, pectorals — are the small ones.
 
 ### Meshing on the GPU (`glmesh.js`)
 

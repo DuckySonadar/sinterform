@@ -187,6 +187,101 @@ console.log('\nit is one solid, not a torso with parts near it');
   }
 }
 
+// ------------------------------------------------- the masses are there -----
+// Every mass in the table is there because leaving it out is visible, and none
+// of the checks above would notice if one went. These are the shapes, asked of
+// the solid: a calf behind the shank, a buttock behind the waist, a deltoid
+// past the acromion, a limb that is not a circle in section, and a spine that
+// curves. Delete any of them and exactly one line here goes red.
+console.log('\nthe masses that make it a body are in it');
+{
+  const H = 1750;
+  const F = figure({ height: H, pose: 'anatomical' });
+  const step = H * 0.0005;
+  // distance from an interior point to the first surface along a direction
+  const exit = (p0, dir) => {
+    if (F.at(p0[0], p0[1], p0[2]) >= 0) return null;
+    for (let t = step; t < H * 0.5; t += step) {
+      const q = [p0[0] + dir[0] * t, p0[1] + dir[1] * t, p0[2] + dir[2] * t];
+      if (F.at(q[0], q[1], q[2]) >= 0) {
+        let lo = t - step, hi = t;
+        for (let i = 0; i < 40; i++) {
+          const m = (lo + hi) / 2;
+          const r = [p0[0] + dir[0] * m, p0[1] + dir[1] * m, p0[2] + dir[2] * m];
+          if (F.at(r[0], r[1], r[2]) < 0) lo = m; else hi = m;
+        }
+        return lo;
+      }
+    }
+    return null;
+  };
+  const back = [0, -1, 0], out = [1, 0, 0], fwd = [0, 1, 0];
+
+  // the gastrocnemius: the back of the shank is much further back at calf
+  // height than just above the ankle, or the leg is a chair leg
+  const knee = F.joint('knee.L'), ankle = F.joint('ankle.L');
+  const legY = knee[1], legX = knee[0];
+  const calfZ = knee[2] - (knee[2] - ankle[2]) * 0.27;
+  const thinZ = ankle[2] + (knee[2] - ankle[2]) * 0.10;
+  const calfBack = exit([legX, legY, calfZ], back);
+  const shinBack = exit([legX, legY, thinZ], back);
+  ok(calfBack > shinBack * 1.5, `a calf: the shank reaches ${calfBack.toFixed(0)} mm `
+    + `back at calf height and ${shinBack.toFixed(0)} mm above the ankle`);
+
+  // the glute: the pelvis reaches further back than the waist does
+  const hipY = F.joint('hip.L')[1];
+  const gluteBack = exit([0, hipY, 0.500 * H], back);
+  const waistBack = exit([0, hipY, 0.645 * H], back);
+  ok(gluteBack > waistBack * 1.15, `a buttock: ${gluteBack.toFixed(0)} mm back at `
+    + `0.500H against ${waistBack.toFixed(0)} mm at the waist`);
+
+  // the deltoid: the shoulder is wider than the joint it hangs from
+  const shoulderX = F.joint('shoulder.L')[0];
+  let widest = 0;
+  for (let f = 0.750; f <= 0.815; f += 0.005)
+    widest = Math.max(widest, exit([0, hipY, f * H], out) || 0);
+  ok(widest > shoulderX * 1.12, `a deltoid: the shoulder measures `
+    + `${widest.toFixed(0)} mm out where the joint is at ${shoulderX.toFixed(0)}`);
+
+  // the pectoral, which is the same statement on the other axis
+  const chestFwd = exit([0, hipY, 0.755 * H], fwd);
+  const ribFwd = exit([0, hipY, 0.690 * H], fwd);
+  ok(chestFwd > ribFwd, `a pectoral: the chest stands ${chestFwd.toFixed(0)} mm `
+    + `proud against ${ribFwd.toFixed(0)} mm below it`);
+
+  // a limb is an ellipse in section, not a circle
+  const armX = F.joint('wrist.L')[0], armY = F.joint('wrist.L')[1];
+  const w = exit([armX, armY, 0.550 * H], out);
+  const dp = exit([armX, armY, 0.550 * H], back);
+  ok(Math.abs(dp / w - FG.GIRTH.forearmAsp) < 0.12,
+     `an elliptical forearm: ${w.toFixed(1)} mm across and ${dp.toFixed(1)} through, `
+     + `a ratio of ${(dp / w).toFixed(2)} against the table's ${FG.GIRTH.forearmAsp}`);
+}
+
+// The spine's S is a pose parameter, so it can be turned off -- and a figure
+// with it off has to be a straight column rather than a broken one.
+console.log('\nthe spine curves, and can be told not to');
+{
+  const H = 1750;
+  const curved = figure({ height: H, pose: { spine: 1, armLift: 0, legSpread: 0, elbow: 0, wrist: 0 } });
+  const straight = figure({ height: H, pose: { spine: 0, armLift: 0, legSpread: 0, elbow: 0, wrist: 0 } });
+  const lean = (F) => F.joint('neck')[1] - F.joint('pelvis')[1];
+  // The trunk's net lean is backwards, which is what a standing posture does:
+  // a lumbar hollow puts the shoulders behind the hips and the neck's own
+  // forward offset brings the head back over the feet. What is checked is that
+  // the curve moves the trunk at all, and that turning it off leaves nothing
+  // but that deliberate offset -- not that the lean has a particular sign.
+  const moved = Math.abs(lean(curved) - lean(straight));
+  ok(moved > 0.008 * H, `curved: the S moves the neck ${moved.toFixed(1)} mm `
+    + `in the sagittal plane (to ${lean(curved).toFixed(1)} mm of the pelvis)`);
+  ok(Math.abs(lean(straight) - FG.GIRTH.neckFwd * H) < 1e-9,
+     'straight: spine 0 stacks the trunk in one line, less the neck\'s own offset');
+  // and either way the head ends up over the feet and at full height
+  for (const [what, F] of [['curved', curved], ['straight', straight]])
+    ok(Math.abs(F.joint('head')[2] - C.chin * H) < 0.004 * H,
+       `${what}: the chin is still at ${(F.joint('head')[2] / H).toFixed(4)}H`);
+}
+
 // ----------------------------------------------------------- it scales ------
 // Stature is the only length in the file; everything else is a fraction of it.
 // So a figure twice as tall is the same figure at twice the size, exactly --

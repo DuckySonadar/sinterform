@@ -137,6 +137,58 @@ console.log('\none mass alone is the primitive it is made of');
                   [26, 26, 34], 6000);
   ok(w < 1e-12, `bone: exactly a wire's round cone, same ends, same radii (worst ${w.toExponential(2)})`);
 
+  // An elliptical bone is that same round cone measured in a squashed space,
+  // with the answer scaled back by the smaller of the two axes -- which is
+  // what keeps it 1-Lipschitz and what makes it a bound rather than a
+  // distance. Both halves of that are checked here: it agrees with the
+  // construction everywhere, and it never over-reports.
+  for (const asp of [0.55, 1.8]) {
+    put([{ name: 'j', mass: { kind: 'bone', len: 24, r0: 5, r1: 3, aspect: asp, k: 0 } }]);
+    SF.wires = [{ name: 'round twin', lines: [[[0, 0, 0, 5], [0, 0, 24, 3]]] }];
+    const ref = (p) => SF.PRIMS.wire.js([p[0], p[1] / asp, p[2]], [1, 1, 1], 0, { fi: 0 })
+                       * Math.min(asp, 1);
+    // Like the ellipsoid, an anisotropic bone is a bound rather than a
+    // distance, so it is clamped from below by its own bounding sphere. That
+    // clamp beats the squashed cone by the whole factor 1/aspect off the ends,
+    // right up to the surface -- which is the bound being loose, not the shape
+    // being different. So the claim to make is about the *solid*: identical
+    // sign everywhere, never under the cone, and equal wherever it is inside.
+    let below = 0, wrongSide = 0, inside = 0, worstIn = 0;
+    for (let i = 0; i < 8000; i++) {
+      // biased onto the bone rather than over the whole neighbourhood, or a
+      // thin one gets a handful of interior samples and the interior claim is
+      // made on nothing
+      const p = [span(9), span(9), span(21) + 11];
+      const a = at(p), b = ref(p);
+      if (a < b - 1e-12) below++;
+      if ((a < 0) !== (b < 0)) wrongSide++;
+      if (b < 0) { inside++; worstIn = Math.max(worstIn, Math.abs(a - b)); }
+    }
+    ok(wrongSide === 0 && inside > 200,
+       `bone: aspect ${asp} encloses exactly that cone squashed `
+       + `(${inside} interior points, no disagreement of side)`);
+    ok(below === 0 && worstIn < 1e-12,
+       `  and never reports under it, and is it exactly within the solid `
+       + `(worst ${worstIn.toExponential(2)})`);
+
+    // the surface really is an ellipse of that ratio, measured on the solid
+    put([{ name: 'j', mass: { kind: 'bone', len: 24, r0: 5, r1: 5, aspect: asp, k: 0 } }]);
+    const reach = (ax) => {
+      let lo = 0, hi = 40;
+      for (let i = 0; i < 60; i++) {
+        const m = (lo + hi) / 2;
+        const p = [0, 0, 12];
+        p[ax] = m;
+        if (at(p) < 0) lo = m; else hi = m;
+      }
+      return lo;
+    };
+    const rx = reach(0), ry = reach(1);
+    ok(Math.abs(ry / rx - asp) < 1e-6,
+       `and its section is ${rx.toFixed(2)} by ${ry.toFixed(2)} mm, a ratio of `
+       + `${(ry / rx).toFixed(3)}`);
+  }
+
   // and the degenerate one, where one ball swallows the other and there is no
   // tangent cone between them -- reachable by tapering a short bone hard
   put([{ name: 'j', mass: { kind: 'bone', len: 2, r0: 9, r1: 1, k: 0 } }]);

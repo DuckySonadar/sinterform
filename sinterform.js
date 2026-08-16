@@ -248,14 +248,16 @@ const DEFAULT_CONSTRUCT = (() => {
     return [0, -Math.sin(h), 0, Math.cos(h)];
   };
   const armDir = (a) => [Math.sin(a * rad), 0, Math.cos(a * rad)];
-  put([0, 0, -4], 14, [0, 0, -14], I, [4, 0, 20], 0, 3, 0);        // spine
+  put([0, 0, -4], 14, [0, 0, -14], I, [4, 1, 20], 0, 3, 0);        // spine
   put([0, 0, -2], 8, [0, 0, -2], I, [7, 5, 8], 1, 0, 3);           // chest
   put([0, 0, 11], 5, [0, 0, 11], I, [5, 0, 0], 2, 0, 2.5);         // head
   put([0, -1, -19], Math.hypot(5, 7, 2.5), [0, -1, -19], I,
       [5, 7, 2.5], 3, 1.2, 2);                                     // base
+  // the arms are elliptical in section -- flattened in y, which the arms' own
+  // rotation leaves along the world's y -- so the default exercises that too
   for (const a of [50, -50]) {
     const u = armDir(a);
-    put([7 * u[0], 0, 4 + 7 * u[2]], 9.2, [0, 0, 4], armQ(a), [2.2, 0, 14], 0, 1.4, 2);
+    put([7 * u[0], 0, 4 + 7 * u[2]], 9.2, [0, 0, 4], armQ(a), [2.2, 0.6, 14], 0, 1.4, 2);
   }
   return Float64Array.from(e);
 })();
@@ -462,21 +464,24 @@ function constructMass(kind, q_0, q_1, q_2, dm_0, dm_1, dm_2, tip) {
     if ((kind < 0.5)) {
       let r0 = dm_0;
       let h = dm_2;
+      let asp = Math.max(dm_1, 1e-4);
+      let e_0 = q_0, e_1 = (q_1 / asp), e_2 = q_2;
+      let m = Math.min(asp, 1.0);
       let sl = ((r0 - tip) / h);
       let a2 = (1.0 - (sl * sl));
       if ((a2 <= 0.0)) {
-        return Math.min((Math.hypot(q_0, q_1, q_2) - r0), (Math.hypot((q_0 - 0.0), (q_1 - 0.0), (q_2 - h)) - tip));
+        return (Math.min((Math.hypot(e_0, e_1, e_2) - r0), (Math.hypot((e_0 - 0.0), (e_1 - 0.0), (e_2 - h)) - tip)) * m);
       }
       let a = Math.sqrt(a2);
-      let w_0 = Math.hypot(q_0, q_1), w_1 = q_2;
+      let w_0 = Math.hypot(e_0, e_1), w_1 = e_2;
       let t = (w_0*(-sl) + w_1*a);
       if ((t < 0.0)) {
-        return (Math.hypot(w_0, w_1) - r0);
+        return ((Math.hypot(w_0, w_1) - r0) * m);
       }
       if ((t > (a * h))) {
-        return (Math.hypot((w_0 - 0.0), (w_1 - h)) - tip);
+        return ((Math.hypot((w_0 - 0.0), (w_1 - h)) - tip) * m);
       }
-      return ((w_0*a + w_1*sl) - r0);
+      return (((w_0*a + w_1*sl) - r0) * m);
     }
     if ((kind < 1.5)) {
       let rr_0 = Math.max(dm_0, 1e-3), rr_1 = Math.max(dm_1, 1e-3), rr_2 = Math.max(dm_2, 1e-3);

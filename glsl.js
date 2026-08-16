@@ -454,18 +454,28 @@ float pSweep(sweeppath w, vec3 p, vec3 d, float r){
   if (kind < 0.5) {
     float r0 = dm.x;
     float h = dm.z;
+    // The cross-section's second axis, as a ratio of the first. A limb is not
+    // a circle in section -- a wrist is 55 mm across and 40 through -- and a
+    // figure built from round bones reads as tubing however good its
+    // proportions are. Dividing the point by the ratio and multiplying the
+    // answer by the smaller scale is the standard way to make an anisotropic
+    // shape out of an isotropic one and stay 1-Lipschitz: the gradient picks
+    // up 1/min(scale) and the factor takes it straight back out.
+    float asp = max(dm.y, 1e-4);
+    vec3 e = vec3(q.x, q.y/asp, q.z);
+    float m = min(asp, 1.0);
     float sl = (r0 - tip)/h;
     float a2 = 1.0 - sl*sl;
     // One ball swallowing the other leaves no tangent cone between them and
     // the hull is just the larger ball -- the same degenerate case a wire's
     // round cone guards, reachable here by tapering a short bone hard.
-    if (a2 <= 0.0) return min(length(q) - r0, length(q - vec3(0.0, 0.0, h)) - tip);
+    if (a2 <= 0.0) return min(length(e) - r0, length(e - vec3(0.0, 0.0, h)) - tip)*m;
     float a = sqrt(a2);
-    vec2 w = vec2(length(q.xy), q.z);
+    vec2 w = vec2(length(e.xy), e.z);
     float t = dot(w, vec2(-sl, a));
-    if (t < 0.0) return length(w) - r0;
-    if (t > a*h) return length(w - vec2(0.0, h)) - tip;
-    return dot(w, vec2(a, sl)) - r0;
+    if (t < 0.0) return (length(w) - r0)*m;
+    if (t > a*h) return (length(w - vec2(0.0, h)) - tip)*m;
+    return (dot(w, vec2(a, sl)) - r0)*m;
   }
   if (kind < 1.5) {
     vec3 rr = max(dm, vec3(1e-3));
@@ -665,7 +675,7 @@ const UNROLL = {
   },
   construct: {
     fn: "pConstruct", stride: 17, arity: [3, 1, 3, 3, 1, 3, 3],
-    helpers: "float constructMass(float kind, vec3 q, vec3 dm, float tip){\n  if ((kind < 0.5)) {\n    float r0 = dm.x;\n    float h = dm.z;\n    float sl = ((r0 - tip) / h);\n    float a2 = (1.0 - (sl * sl));\n    if ((a2 <= 0.0)) {\n      return min((length(q) - r0), (length((q - vec3(0.0, 0.0, h))) - tip));\n    }\n    float a = sqrt(a2);\n    vec2 w = vec2(length(q.xy), q.z);\n    float t = dot(w, vec2((-sl), a));\n    if ((t < 0.0)) {\n      return (length(w) - r0);\n    }\n    if ((t > (a * h))) {\n      return (length((w - vec2(0.0, h))) - tip);\n    }\n    return (dot(w, vec2(a, sl)) - r0);\n  }\n  if ((kind < 1.5)) {\n    vec3 rr = max(dm, vec3(1e-3));\n    float k0 = length((q / rr));\n    float k1 = length((q / (rr * rr)));\n    if ((k1 < 1e-6)) {\n      return (-min(rr.x, min(rr.y, rr.z)));\n    }\n    return ((k0 * (k0 - 1.0)) / k1);\n  }\n  if ((kind < 2.5)) {\n    return (length(q) - dm.x);\n  }\n  vec3 e = max((dm - tip), vec3(0.0));\n  vec3 g = (abs(q) - e);\n  return ((length(max(g, 0.0)) + min(max(g.x, max(g.y, g.z)), 0.0)) - tip);\n}\n",
+    helpers: "float constructMass(float kind, vec3 q, vec3 dm, float tip){\n  if ((kind < 0.5)) {\n    float r0 = dm.x;\n    float h = dm.z;\n    float asp = max(dm.y, 1e-4);\n    vec3 e = vec3(q.x, (q.y / asp), q.z);\n    float m = min(asp, 1.0);\n    float sl = ((r0 - tip) / h);\n    float a2 = (1.0 - (sl * sl));\n    if ((a2 <= 0.0)) {\n      return (min((length(e) - r0), (length((e - vec3(0.0, 0.0, h))) - tip)) * m);\n    }\n    float a = sqrt(a2);\n    vec2 w = vec2(length(e.xy), e.z);\n    float t = dot(w, vec2((-sl), a));\n    if ((t < 0.0)) {\n      return ((length(w) - r0) * m);\n    }\n    if ((t > (a * h))) {\n      return ((length((w - vec2(0.0, h))) - tip) * m);\n    }\n    return ((dot(w, vec2(a, sl)) - r0) * m);\n  }\n  if ((kind < 1.5)) {\n    vec3 rr = max(dm, vec3(1e-3));\n    float k0 = length((q / rr));\n    float k1 = length((q / (rr * rr)));\n    if ((k1 < 1e-6)) {\n      return (-min(rr.x, min(rr.y, rr.z)));\n    }\n    return ((k0 * (k0 - 1.0)) / k1);\n  }\n  if ((kind < 2.5)) {\n    return (length(q) - dm.x);\n  }\n  vec3 e = max((dm - tip), vec3(0.0));\n  vec3 g = (abs(q) - e);\n  return ((length(max(g, 0.0)) + min(max(g.x, max(g.y, g.z)), 0.0)) - tip);\n}\n",
     pre: "  float best = 1e18;",
     macro: "#define ITEM(CONCULL, CONCULLR, CONORG, CONQ, CONQW, CONMASS, CONMISC) {\\\n  vec3 bc = CONCULL; \\\n  float br = CONCULLR; \\\n  float bd = (length((p - bc)) - br); \\\n  if ((bd < best)) { \\\n    vec3 org = CONORG; \\\n    vec3 qv = CONQ; \\\n    float qw = CONQW; \\\n    vec3 dm = CONMASS; \\\n    vec3 ms = CONMISC; \\\n    vec3 pa = (p - org); \\\n    vec3 t = vec3(((qv.y * pa.z) - (qv.z * pa.y)), ((qv.z * pa.x) - (qv.x * pa.z)), ((qv.x * pa.y) - (qv.y * pa.x))); \\\n    vec3 lp = (pa + (((t * qw) + vec3(((qv.y * t.z) - (qv.z * t.y)), ((qv.z * t.x) - (qv.x * t.z)), ((qv.x * t.y) - (qv.y * t.x)))) * 2.0)); \\\n    best = smin(best, max(constructMass(ms.x, lp, dm, ms.y), (bd + ms.z)), ms.z); \\\n  } }\n",
     post: "  return best;"
