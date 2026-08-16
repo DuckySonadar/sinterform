@@ -98,6 +98,7 @@
 <script src="sketch3d.js"></script>
 <script src="sweep.js"></script>
 <script src="construct.js"></script>
+<script src="figure.js"></script>
 <script src="glmesh.js"></script>
 <script src="viewer.js"></script>
 <script>
@@ -297,6 +298,18 @@ const SCENES = {
     ] });
     SinterForm.constructs = [construct];
     node.p[2] += 30;
+    return [{ id: 0, nodes: [N('construct', node)] }];
+  },
+
+  // The figure, at 400 mm so it fits the same view as everything else. One
+  // node, nineteen connectors, and every proportion in it comes out of the
+  // table in figure.js rather than out of anybody's eye.
+  'mannequin': () => {
+    const H = 400;
+    const { construct, node } = SinterConstruct.pack(
+      SinterFigure.mannequin({ height: H, pose: 'a' }));
+    SinterForm.constructs = [construct];
+    node.p[2] = H / 2;                       // ground it: the rig is built centred
     return [{ id: 0, nodes: [N('construct', node)] }];
   },
 

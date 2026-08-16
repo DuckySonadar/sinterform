@@ -14,6 +14,7 @@ STL output. Dependency-free JavaScript.
 | `sketch3d.js` | the same, one dimension up → planar faces → an extrusion |
 | `sweep.js` | a section dragged along a sketch path, and `pack()` to make it a node |
 | `construct.js` | a skeleton of connectors → masses with resolved frames → a node |
+| `figure.js` | the human body as one of those skeletons: proportions, masses, poses |
 | `viewer.html` · `viewer.js` | a window onto the above — open it, no server, no build |
 | `demo3d.html` | the 3D sketcher, drawn rough and solved in front of you |
 
@@ -88,6 +89,10 @@ whichever model happened to use it. `profile` is in it too, drawing its default
 is a primitive nobody can see to fix, and `wire` is there on the same terms
 with its default tapered run. (`plane` and `field` sit it out: one is a
 half-space that would swallow the grid, the other needs real samples.)
+
+**mannequin** is a whole figure as one node: twenty-one connectors, every
+proportion in it out of the table in `figure.js` rather than out of anybody's
+eye.
 
 **construct — a posed rig** is the one that shows what a construct is for.
 Nothing in it was modelled in the pose it is drawn in: the rig is declared at
@@ -742,6 +747,72 @@ a valid under-estimate, so the greater of the two is one as well: taking
 `max(mass, ballDistance)` makes the premise true by construction, costs a `max`,
 and tightens the ellipsoid's far field on the way past.
 
+### The mannequin (`figure.js`)
+
+A human figure, as a rig for the above. It is **not** a primitive, and that is
+the whole reason it works: a primitive gets three dims and a round slot, and a
+body needs thirty numbers before it has been posed at all. So the figure is
+*content* — a table of proportions and a tree of joints — handed to a mechanism
+that already knows how to turn those into a solid.
+
+```js
+const rig = SinterFigure.mannequin({ height: 1750, build: 1, figure: 0, pose: 'a' });
+const { construct, node } = SinterConstruct.pack(rig);
+SinterForm.constructs = [construct];
+node.p[2] = 1750 / 2;            // the rig is built centred; this stands it up
+```
+
+| option | is |
+| --- | --- |
+| `height` | stature in mm. The only length in the file — everything else is a fraction of it |
+| `build` | girth multiplier. Scales radii and blends, never a length |
+| `figure` | 0…1. Shoulder-to-hip ratio, waist, and a bust above 0.35 |
+| `pose` | `'anatomical'`, `'a'`, `'relaxed'`, `'t'`, or `{ armLift, legSpread, elbow, wrist }` |
+
+`mannequin()` returns the rig rather than the geometry, so posing it is editing
+an object and packing again:
+
+```js
+rig.joints.find(j => j.name === 'elbow.L').pose = [90, 0, 0];
+```
+
+**The proportions are somebody else's.** `CANON` is Drillis & Contini's table
+of landmark heights and segment lengths as fractions of stature — the one
+Winter tabulates and every gait lab uses. They are fractions because that is
+how they were measured, and because it makes the scaling rule automatic: a
+figure is one number tall and everything else follows. The artist's canon
+agrees; a head is 0.130 of stature, which is 7.7 heads to a body, near enough
+the 7.5-head figure life drawing teaches and not the 8-head one fashion
+illustration stylises to. `check-figure.mjs` holds the built solid to that
+table within 0.004 of stature, which is the table's own agreement with itself.
+
+**What "mannequin" rules out**: a shop-window mannequin or an artist's lay
+figure — correct proportions and correct masses, and no features. No face, no
+fingers or toes, no explicit anatomy. `figure` moves the silhouette the way a
+dress form does and there is nothing else there to find.
+
+#### Two things a figure needs that a skeleton does not obviously imply
+
+A **shoulder girdle**. The first version had a hand's breadth of clear air
+between each deltoid and the chest, because a thorax ellipsoid is at its widest
+around the nipple line and has tapered nearly to a point by shoulder height —
+so the arms hung off nothing. What fixes it is the mass a clavicle and a
+trapezius actually put there: one capsule laid across the top of the thorax,
+ending at each shoulder joint, so everything from sternum to arm is one blended
+run. It is why a figure built from a torso and two arms never looks right.
+
+**Three masses up the trunk**, not one: a pelvis, a waist and a thorax, with
+the blends between them doing what a single ellipsoid cannot. A body's
+silhouette is that pair of curves, and it is the first thing missing when a
+figure reads as a doll.
+
+One caution that falls out of the construct's design rather than this file's: a
+node folds every mass with `smin` against the *running* distance, so a blend
+radius blends with everything already found, not only with the neighbour it was
+meant for. A generous blend on the thigh fills the hip crease and also fuses
+the two thighs to each other further down the leg than they should be. The
+lever is the radius.
+
 ### Meshing on the GPU (`glmesh.js`)
 
 Optional, and optional in the strongest sense: the kernel does not import it,
@@ -1149,6 +1220,24 @@ The tightness half of that last one is not decoration. It is what caught a
 `massExtent` that used a bone's full length where its half-length belonged: the
 box still contained the solid, so no containment check anywhere would have said
 a word, and every mesh of every rig would have been quietly oversized.
+
+### `check-figure.mjs` — is the mannequin the figure the table says it is?
+
+```
+node check-figure.mjs
+```
+
+`check-construct` asks whether a rig packs correctly; this asks whether *this*
+rig is a body. The landmarks land where the canon puts them, a figure asked for
+1750 mm is 1750 mm from sole to vertex, 900 mm doubled is 1800 mm to the last
+bit, `build` moves girth without moving a single height, and posing an elbow
+swings the wrist and leaves the elbow alone.
+
+The one that earns the file is **connectivity**: flood-fill the interior on a
+coarse grid, in four poses, and count the components. A figure whose arms are
+not attached meshes, exports, and passes every other check in this repository —
+it just is not a person. Nothing catches that except asking the solid whether
+you can walk from one end of it to the other.
 
 ### `check-viewer.mjs` — does the viewer work, and do the halves agree in the large?
 

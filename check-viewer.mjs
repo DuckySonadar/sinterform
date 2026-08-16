@@ -68,6 +68,11 @@ const SCENES = ['every primitive', 'booleans', 'two bodies, no blend across',
                 // which is where a bad `ext` on a *posed* rig would show,
                 // since posing is the one thing here that moves the bounds.
                 'construct — a posed rig',
+                // The largest construct in the repository -- twenty-one
+                // connectors, every kind of mass, every one of them turned --
+                // and the one where a wrong sign in the quaternion would be
+                // unmistakable rather than subtle.
+                'mannequin',
                 // The two heaviest, and the last to arrive: a sweep's item is
                 // the largest of any slotted primitive, and these used to
                 // outlast the screenshot's own timeout on the software
@@ -129,6 +134,7 @@ ok(!(await page.textContent('#err')).trim(), 'no shader or mesh error reported')
   // scene switches below each refill what they need.
   await page.evaluate(() => {
     SinterForm.profiles = []; SinterForm.wires = []; SinterForm.sweeps = [];
+    SinterForm.constructs = [];
   });
 }
 
