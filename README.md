@@ -302,7 +302,10 @@ until the twins are compared per point.
 **No budgets live in this repository.** How many shapes fit in the uniforms
 and how many fields fit in texture units belong to whoever packs them — a
 consumer using an SSBO has neither limit — so they are arguments rather than
-constants. MetaMeld's own numbers are 32 shapes at 3 vec4 each, and 4 fields.
+constants. MetaMeld packs 3 vec4 a shape and 4 fields, and reads the shape
+count off `MAX_FRAGMENT_UNIFORM_VECTORS` rather than fixing it — where the
+budget runs out it meshes the scene instead of refusing the shape, so the
+number bounds a *picture* and never a document.
 
 A dim is `[label, min, max, step, unit?]`. **No unit means millimetres, and
 millimetres are the only thing that scales** — multiplying a shape by 1.5 has
