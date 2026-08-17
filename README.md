@@ -90,9 +90,9 @@ is a primitive nobody can see to fix, and `wire` is there on the same terms
 with its default tapered run. (`plane` and `field` sit it out: one is a
 half-space that would swallow the grid, the other needs real samples.)
 
-**mannequin** is a whole figure as one node: forty-three connectors, every
-proportion in it out of the table in `figure.js` rather than out of anybody's
-eye.
+**mannequin** is a whole figure as one node: seventeen connectors wearing
+fifty-four masses, every proportion in it out of the table in `figure.js`
+rather than out of anybody's eye.
 
 **construct — a posed rig** is the one that shows what a construct is for.
 Nothing in it was modelled in the pose it is drawn in: the rig is declared at
@@ -663,12 +663,13 @@ SinterForm.constructs = [construct];        // getter/setter, same rule as field
 ```
 
 A **connector is a joint**: a parent, an offset in the parent's frame, a rest
-rotation, a pose rotation, and the mass it wears.
+rotation, a pose rotation, and the masses it wears.
 
 ```js
 { name: 'elbow', parent: 'shoulder', offset: [0, 0, 30],
   rot: [0, 0, 0], pose: [0, -55, 0],
-  mass: { kind: 'bone', len: 26, r0: 4.6, r1: 3.2, k: 3.5 } }
+  mass: [{ kind: 'bone', len: 26, r0: 4.6, r1: 3.2, k: 3.5 },
+         { kind: 'ellipsoid', half: [3.6, 3.9, 7.5], offset: [0, 0, 6], k: 2.3 }] }
 ```
 
 That is the object an animation keyframes — you rotate a joint, not a bone — and
@@ -676,6 +677,17 @@ since every bone has exactly one proximal joint, making the joint the object
 costs nothing and gives the keyframe an owner. A connector with no `mass` is a
 pure articulation and contributes no item; parents must be declared before their
 children, which is what makes one forward pass enough.
+
+**`mass` is one mass or a list of them**, and the distinction matters more than
+it looks. How many places a body bends and how many primitives it takes to look
+like a body are two different counts: an arm articulates at the shoulder, the
+elbow and the wrist and nowhere else, but a shoulder wears a humerus, a deltoid,
+a biceps and a triceps. Forcing them to be one count means inventing child
+connectors with zero offsets to carry the extra shapes — and then the skeleton
+is full of entries that do not articulate, and anything walking `joints` to
+build an animation has to know which of them are real. The mannequin is 17
+connectors and 54 masses; it was 43 connectors before this, and the geometry
+did not change.
 
 Four kinds of mass, each of them a primitive the library already believes in:
 
@@ -803,9 +815,14 @@ dress form does and there is nothing else there to find.
 
 #### The masses, and why each one is there
 
-Forty-three connectors. Every mass in the table earns its place by being
-visible in its absence, which is also how `check-figure.mjs` tests them — delete
-one and exactly one assertion goes red.
+Seventeen joints — pelvis, lumbar, thorax, neck, head, and shoulder/elbow/wrist
+and hip/knee/ankle a side — wearing fifty-four masses between them. Every mass
+earns its place by being visible in its absence, which is also how
+`check-figure.mjs` tests them: delete one and exactly one assertion goes red.
+
+The skeleton is only the places it bends. `check-figure` holds it to that —
+every connector past the root is somewhere or something its parent is not, and
+turning any one of them moves the figure.
 
 **A shoulder girdle.** The first version had a hand's breadth of clear air
 between each deltoid and the chest, because a thorax ellipsoid is at its widest
@@ -822,10 +839,14 @@ thing missing when a figure reads as a doll.
 
 **A gastrocnemius.** The single most visible omission on a leg: without it the
 back of the shank runs straight from knee to ankle and the whole leg reads as a
-chair leg. The same argument puts a quadriceps high and in front of the thigh,
-a biceps a third of the way down the upper arm, and a flexor bulge a quarter of
-the way down the forearm — a limb is thickest along its segments, not at its
-joints.
+chair leg. The same argument puts a quadriceps high and in front of the thigh
+and a hamstring high and behind it, a biceps a third of the way down the upper
+arm and a triceps lower and behind, a flexor bulge a quarter of the way down
+the forearm, and a shin crest and an Achilles on the shank — a limb is thickest
+along its segments, not at its joints, and it is thickest on one side of them.
+
+**A back.** Scapulae standing off the rib cage and a trapezius running from the
+neck out over them. Without both, a back is the smooth reverse of a chest.
 
 **A skull and a jaw**, not an ovoid. An ellipsoid as tall as a whole head comes
 to a point at the crown; a nearly-round cranium with a jaw hung off the front of

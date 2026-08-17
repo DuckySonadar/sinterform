@@ -370,10 +370,67 @@ console.log('\n`figure` moves the silhouette and adds nothing else');
   const shM = m.joint('shoulder.L')[0], shF = f.joint('shoulder.L')[0];
   ok(shF < shM * 0.97, `shoulders narrow: the joint moves in from `
     + `${shM.toFixed(0)} to ${shF.toFixed(0)} mm off the midline`);
-  ok(f.rig.joints.length > m.rig.joints.length,
-     `and figure 1 carries ${f.rig.joints.length - m.rig.joints.length} more connectors than figure 0`);
-  ok(FG.mannequin({ figure: 0.3 }).joints.length === m.rig.joints.length,
+  const masses = (F) => F.packed.construct.items.length / SF.CON_STRIDE;
+  ok(masses(f) > masses(m) && f.rig.joints.length === m.rig.joints.length,
+     `and figure 1 carries ${masses(f) - masses(m)} more masses on the same `
+     + `${f.rig.joints.length} connectors`);
+  ok(CN.pack(FG.mannequin({ figure: 0.3 })).construct.items.length / SF.CON_STRIDE
+       === masses(m),
      'while a mid setting is an androgynous form rather than half of one');
+}
+
+// ------------------------------------------------------------- skeleton -----
+// The count that matters is not how many shapes the figure is made of but how
+// many places it bends. Those are different numbers and the rig keeps them
+// apart: a connector is a joint, and the flesh on it is however many
+// primitives that flesh takes.
+//
+// Before a connector could wear a list, a second shape on a joint meant
+// inventing a child with a zero offset to carry it -- so the skeleton filled up
+// with deltoids and bellies and calves, and anything walking `joints` to build
+// an animation had to know which entries were real. This is the check that they
+// all are.
+console.log('\nevery connector is a joint, not a place to hang a shape');
+{
+  const F = figure({ height: 1750, pose: 'anatomical' });
+  const n = F.rig.joints.length;
+  const masses = F.packed.construct.items.length / SF.CON_STRIDE;
+  ok(masses > n * 2, `${n} connectors carrying ${masses} masses`);
+
+  // Every connector past the root moves relative to its parent -- it is
+  // somewhere else, or it points somewhere else, or both. One that is neither
+  // is a shape holder wearing a skeleton's clothes.
+  const idle = F.rig.joints.filter((j, i) => {
+    if (i === 0) return false;
+    const off = j.offset || [0, 0, 0], rot = j.rot || [0, 0, 0];
+    return !off.some(v => Math.abs(v) > 1e-9) && !rot.some(v => Math.abs(v) > 1e-9);
+  });
+  ok(idle.length === 0, 'and each one is somewhere its parent is not'
+    + (idle.length ? ` — ${idle.map(j => j.name).join(', ')}` : ''));
+
+  // and they are the joints a body actually has
+  const want = ['pelvis', 'lumbar', 'thorax', 'neck', 'head',
+                'shoulder.L', 'elbow.L', 'wrist.L', 'hip.L', 'knee.L', 'ankle.L'];
+  const have = new Set(F.rig.joints.map(j => j.name));
+  const missing = want.filter(w => !have.has(w));
+  ok(missing.length === 0, `named for the articulations they are`
+    + (missing.length ? ` — missing ${missing.join(', ')}` : ''));
+
+  // posing any of them has to move geometry, or it is not an articulation
+  let dead = [];
+  for (const j of F.rig.joints) {
+    if (j.name === 'pelvis') continue;               // the root turns everything
+    const bent = figure({ height: 1750, pose: 'anatomical' });
+    const t = bent.rig.joints.find(x => x.name === j.name);
+    t.pose = [25, 0, 0];
+    const moved = CN.pack(bent.rig);
+    const before = F.packed.construct.items, after = moved.construct.items;
+    let diff = 0;
+    for (let i = 0; i < before.length; i++) diff = Math.max(diff, Math.abs(before[i] - after[i]));
+    if (diff < 1) dead.push(j.name);
+  }
+  ok(dead.length === 0, 'and turning any one of them moves the figure'
+    + (dead.length ? ` — ${dead.join(', ')} did nothing` : ''));
 }
 
 // -------------------------------------------------------------- refusals ----

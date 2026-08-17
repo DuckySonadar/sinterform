@@ -198,6 +198,53 @@ console.log('\none mass alone is the primitive it is made of');
   ok(w2 < 1e-12, `bone: and where one ball swallows the other (worst ${w2.toExponential(2)})`);
 }
 
+// ------------------------------------------------------------ many masses ---
+// A connector is a joint and the flesh on it is however many primitives that
+// flesh takes. Those are two counts and the rig keeps them apart: hanging a
+// second shape on a joint must not mean inventing a child connector with a
+// zero offset to hold it, because then the skeleton fills up with things that
+// do not articulate.
+console.log('\na connector wears as many masses as it needs');
+{
+  const one = put([{ name: 'j', mass: { kind: 'sphere', r: 6 } }]);
+  const two = put([{ name: 'j', mass: [{ kind: 'sphere', r: 6 },
+                                       { kind: 'sphere', r: 5, offset: [14, 0, 0] }] }]);
+  ok(one.construct.items.length / SF.CON_STRIDE === 1
+     && two.construct.items.length / SF.CON_STRIDE === 2
+     && two.world.length === 1,
+     'one connector, two masses, two items');
+
+  // and the list is exactly the same shape as the two connectors it replaces
+  const split = put([
+    { name: 'a', mass: { kind: 'sphere', r: 6 } },
+    { name: 'b', parent: 'a', offset: [14, 0, 0], mass: { kind: 'sphere', r: 5 } }
+  ]);
+  const splitAt = pts => at(pts);
+  const splitVals = [];
+  for (let i = 0; i < 3000; i++) splitVals.push([span(30), span(30), span(30)]);
+  const asSplit = splitVals.map(splitAt);
+  SF.constructs = [two.construct];
+  let w = 0;
+  splitVals.forEach((p, i) => { w = Math.max(w, Math.abs(at(p) - asSplit[i])); });
+  ok(w < 1e-12, `and draws what the two-connector form drew (worst ${w.toExponential(2)})`);
+  ok(two.world.length < split.world.length,
+     `with ${two.world.length} connector instead of ${split.world.length}`);
+
+  // an empty list is a pure articulation, which is a useful thing to be
+  ok(CN.massList({ mass: [] }).length === 0
+     && CN.massList({}).length === 0
+     && CN.massList({ mass: { kind: 'sphere', r: 1 } }).length === 1,
+     'and no mass at all is a joint that only carries what hangs below it');
+
+  // a bad mass names the connector it is on, or a rig of forty is a hunt
+  let named = false;
+  try {
+    CN.pack({ joints: [{ name: 'elbow.L',
+      mass: [{ kind: 'sphere', r: 3 }, { kind: 'wing', r: 3 }] }] });
+  } catch (e) { named = /elbow\.L/.test(e.message); }
+  ok(named, 'and a mass it cannot read is reported against its connector');
+}
+
 // ---------------------------------------------------------------- frames ----
 // The kernel turns a node with `invRot` on Euler degrees applied Rz*Ry*Rx.
 // A connector turns with a quaternion. They have to mean the same thing by the

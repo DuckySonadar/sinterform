@@ -10,9 +10,19 @@
  *
  * The skeleton is a tree of **connectors**. A connector is a joint: a parent,
  * an offset in the parent's frame, a rest rotation, a pose rotation, and the
- * mass it wears. That is the object an animation keyframes -- you rotate a
+ * masses it wears. That is the object an animation keyframes -- you rotate a
  * joint, not a bone -- and since every bone has exactly one proximal joint,
  * making the joint the object costs nothing and gives the keyframe an owner.
+ *
+ * `mass` is one mass or a list of them, and the distinction matters more than
+ * it looks. How many places a body bends and how many primitives it takes to
+ * look like a body are two different counts: an arm articulates at the
+ * shoulder, the elbow and the wrist and nowhere else, but a shoulder wears a
+ * humerus, a deltoid, a biceps and a triceps. Forcing them to be one count
+ * means inventing child connectors with zero offsets to carry the extra
+ * shapes -- and then the skeleton is full of things that do not articulate,
+ * and anything walking `joints` to build an animation has to know which
+ * entries are real.
  *
  * The tree is walked **here**, once, and never by the evaluator. `pack()`
  * composes each connector's transform down the chain and emits one item per
@@ -158,6 +168,21 @@ function massData(m) {
   }
 }
 
+// What a connector wears, as a list. One mass or many: a joint is an
+// articulation and the flesh on it is however many primitives that flesh
+// takes, which are two different counts and should not be forced to be one.
+//
+// Hanging a second shape off a joint used to mean inventing a child connector
+// with a zero offset to carry it -- which put things in the skeleton that do
+// not articulate, so iterating `joints` to build an animation found a deltoid
+// and a biceps among the shoulders. The skeleton is the topology; this is the
+// geometry, and the two are now counted separately.
+function massList(j) {
+  const m = j.mass;
+  if (m === undefined || m === null) return [];
+  return Array.isArray(m) ? m.filter(x => x !== undefined && x !== null) : [m];
+}
+
 function num(v, what) {
   if (typeof v !== 'number' || !Number.isFinite(v))
     throw new Error(`${what} must be a finite number`);
@@ -261,7 +286,8 @@ function pack(rig, opts) {
 
   joints.forEach((j, i) => {
     if (!j) throw new Error(`connector ${i} is empty`);
-    if ('scale' in j || (j.mass && 'scale' in j.mass))
+    const wears = massList(j);
+    if ('scale' in j || wears.some(m => m && 'scale' in m))
       throw new Error(`connector ${j.name || i}: a connector transform is a rigid `
         + 'motion -- rotation and translation only. Size belongs in the mass\'s '
         + 'own dims, not in the frame: a scaled frame stops the primitive being '
@@ -290,33 +316,37 @@ function pack(rig, opts) {
     world.push({ p: wp, q: wq });
     if (j.name) byName.set(j.name, i);
 
-    if (!j.mass) return;                  // a pure articulation carries no shape
+    // A connector with no mass is a pure articulation, which is a useful thing
+    // to be: a clavicle or a spine link earns its place by what hangs below it.
+    for (const one of wears) {
+      let md;
+      try { md = massData(one); }
+      catch (e) { throw new Error(`connector ${j.name || i}: ${e.message}`); }
+      const k = Math.max(one.k || 0, 0);
+      // A mass may sit off the joint it hangs from -- a thorax is centred up
+      // the spine, not at its base, and a deltoid caps a shoulder a hand's
+      // width down the arm -- and that offset is resolved here, so the item's
+      // origin is the mass's own and the pivot never reaches the shader.
+      const mq = qnorm(qmul(wq, qfromEuler(one.rot || [0, 0, 0])));
+      const mp = add(wp, qrot(wq, one.offset || [0, 0, 0]));
+      const ball = massBall(md);
+      const iq = qconj(mq);
 
-    const md = massData(j.mass);
-    const k = Math.max(j.mass.k || 0, 0);
-    // the mass may sit off the joint it hangs from -- a thorax is centred up
-    // the spine, not at its base -- and that offset is resolved here too, so
-    // the item's origin is the mass's own and the pivot never reaches the
-    // shader at all
-    const mq = qnorm(qmul(wq, qfromEuler(j.mass.rot || [0, 0, 0])));
-    const mp = add(wp, qrot(wq, j.mass.offset || [0, 0, 0]));
-    const ball = massBall(md);
-    const iq = qconj(mq);
+      const o = items.length;
+      for (let n = 0; n < STRIDE; n++) items.push(0);
+      const bc = add(mp, qrot(mq, ball.c));
+      items[o] = bc[0]; items[o + 1] = bc[1]; items[o + 2] = bc[2];
+      items[o + 3] = ball.r + k;
+      items[o + 4] = mp[0]; items[o + 5] = mp[1]; items[o + 6] = mp[2];
+      items[o + 7] = iq[0]; items[o + 8] = iq[1]; items[o + 9] = iq[2];
+      items[o + 10] = iq[3];
+      items[o + 11] = md.dims[0]; items[o + 12] = md.dims[1]; items[o + 13] = md.dims[2];
+      items[o + 14] = md.kind; items[o + 15] = md.tip; items[o + 16] = k;
 
-    const o = items.length;
-    for (let n = 0; n < STRIDE; n++) items.push(0);
-    const bc = add(mp, qrot(mq, ball.c));
-    items[o] = bc[0]; items[o + 1] = bc[1]; items[o + 2] = bc[2];
-    items[o + 3] = ball.r + k;
-    items[o + 4] = mp[0]; items[o + 5] = mp[1]; items[o + 6] = mp[2];
-    items[o + 7] = iq[0]; items[o + 8] = iq[1]; items[o + 9] = iq[2];
-    items[o + 10] = iq[3];
-    items[o + 11] = md.dims[0]; items[o + 12] = md.dims[1]; items[o + 13] = md.dims[2];
-    items[o + 14] = md.kind; items[o + 15] = md.tip; items[o + 16] = k;
-
-    // stash what the extent pass needs, rather than unpacking the item again
-    items._ = items._ || [];
-    items._.push({ md, q: mq, p: mp, k });
+      // stash what the extent pass needs, rather than unpacking the item again
+      items._ = items._ || [];
+      items._.push({ md, q: mq, p: mp, k });
+    }
   });
 
   if (!items.length)
@@ -354,7 +384,7 @@ function extentOf(masses) {
 
 function add(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
 
-const SinterConstruct = { pack, MASS_KINDS, STRIDE, SMIN_BULGE,
+const SinterConstruct = { pack, massList, MASS_KINDS, STRIDE, SMIN_BULGE,
                           qmul, qconj, qrot, qfromEuler, qnorm,
                           massData, massBall, massExtent, massCentre };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterConstruct;

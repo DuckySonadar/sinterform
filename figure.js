@@ -114,6 +114,12 @@ const GIRTH = {
   // The latissimus fans up the side of the rib cage and is most of what makes
   // a back read as a back rather than as the other side of a chest.
   latHalf:     [0.0255, 0.0450, 0.0620], latAt:     0.733, latOut: 0.0620,
+  // The scapulae stand off the back of the rib cage and the trapezius runs
+  // from the neck out over them. Both are back masses, and a back with
+  // neither is the smooth reverse of a chest.
+  scapHalf:    [0.0330, 0.0230, 0.0420], scapAt:    0.770,
+    scapBack:  0.0355, scapOut:  0.0420,
+  trapHalf:    [0.0620, 0.0260, 0.0320], trapAt:    0.795, trapBack: 0.0090,
   bustHalf:    [0.0440, 0.0350, 0.0410], bustAt:    0.752, bustFwd: 0.0300,
   // The shoulder girdle, as one capsule from acromion to acromion. Without it
   // the arms hang off nothing: a thorax ellipsoid is at its widest around the
@@ -149,6 +155,7 @@ const GIRTH = {
   // down -- only the flesh does.
   upperArm0:   0.0265, upperArm1:  0.0205, upperArmAsp: 0.95, upperArmDrop: 0.030,
   bicepsHalf:  [0.0235, 0.0270, 0.0450], bicepsAt: 0.34, bicepsFwd: 0.0060,
+  tricepHalf:  [0.0225, 0.0250, 0.0480], tricepAt: 0.30, tricepBack: 0.0075,
   forearm0:    0.0215, forearm1:   0.0130, forearmAsp: 0.86,
   flexorHalf:  [0.0205, 0.0225, 0.0430], flexorAt: 0.24,
   // A mannequin's hand is a mitten, but a mitten with a palm, a thumb and a
@@ -165,8 +172,14 @@ const GIRTH = {
   // whole leg reads as a chair leg.
   thigh0:      0.0470, thigh1: 0.0315, thighAsp: 1.02,
   quadHalf:    [0.0400, 0.0330, 0.0800], quadAt: 0.34, quadFwd: 0.0080,
+  hamHalf:     [0.0360, 0.0310, 0.0800], hamAt: 0.30, hamBack: 0.0090,
   shank0:      0.0300, shank1: 0.0180, shankAsp: 0.94,
   calfHalf:    [0.0290, 0.0330, 0.0610], calfAt: 0.27, calfBack: 0.0110,
+  // The shin's crest and the Achilles: the front of a shank is a flat plane
+  // over bone and the back of it narrows to a tendon, and the pair of them
+  // are why an ankle is the thinnest part of a leg from the side.
+  shinHalf:    [0.0200, 0.0230, 0.0700], shinAt: 0.45, shinFwd: 0.0090,
+  achilHalf:   [0.0150, 0.0170, 0.0330], achilAt: 0.90, achilBack: 0.0080,
   // The foot as a tapered bone laid forward, with the heel a mass of its own:
   // a rounded box has no arch, no heel and no toe taper, and reads as a ski.
   footR0:      0.0195, footR1: 0.0250, footAsp: 0.70, footLen: 0.1050,
@@ -189,9 +202,11 @@ const BLEND = {
   pelvis: 0.000, glute: 0.030, waist: 0.042, belly: 0.030, thorax: 0.034,
   sternum: 0.026, pec: 0.020, lat: 0.024, bust: 0.024, yoke: 0.022,
   neck: 0.013, cranium: 0.010, jaw: 0.012,
-  deltoid: 0.020, upperArm: 0.012, biceps: 0.016,
+  scap: 0.020, trap: 0.026,
+  deltoid: 0.020, upperArm: 0.012, biceps: 0.016, tricep: 0.016,
   forearm: 0.010, flexor: 0.013, palm: 0.009, finger: 0.007, thumb: 0.006,
-  thigh: 0.016, quad: 0.018, shank: 0.011, calf: 0.014,
+  thigh: 0.016, quad: 0.018, ham: 0.018, shank: 0.011, calf: 0.014,
+  shin: 0.012, achil: 0.008,
   foot: 0.010, heel: 0.012
 };
 
@@ -288,96 +303,93 @@ function mannequin(opts) {
   const bend = (deg) => [deg * P.spine, 0, 0];
 
   // ---- trunk -------------------------------------------------------------
+  // The whole trunk is four joints. Everything else it wears is flesh on those
+  // joints rather than a joint of its own -- a glute does not articulate, and
+  // putting it in the skeleton would mean anything walking `joints` to build an
+  // animation had to know which entries were real.
   add({ name: 'pelvis', offset: [0, -yMid, L(CANON.hip) - H / 2], rot: bend(SPINE.pelvis),
-        mass: { kind: 'ellipsoid',
-                half: [G(GIRTH.pelvisHalf[0]) * hipWiden, G(GIRTH.pelvisHalf[1]),
-                       G(GIRTH.pelvisHalf[2])],
-                offset: [0, -L(GIRTH.pelvisBack), rise(GIRTH.pelvisAt - CANON.hip, tiltP)],
-                k: G(BLEND.pelvis) } });
+        mass: [
+          { kind: 'ellipsoid',
+            half: [G(GIRTH.pelvisHalf[0]) * hipWiden, G(GIRTH.pelvisHalf[1]),
+                   G(GIRTH.pelvisHalf[2])],
+            offset: [0, -L(GIRTH.pelvisBack), rise(GIRTH.pelvisAt - CANON.hip, tiltP)],
+            k: G(BLEND.pelvis) },
+          // Two glutes rather than one mass, because the cleft between them is
+          // the shape: one ellipsoid across the back of the pelvis is a shelf.
+          ...[1, -1].map(side => ({ kind: 'ellipsoid',
+            half: [G(GIRTH.gluteHalf[0]), G(GIRTH.gluteHalf[1]) * gluteFull,
+                   G(GIRTH.gluteHalf[2])],
+            offset: [side * L(GIRTH.gluteOut), -L(GIRTH.gluteBack),
+                     rise(GIRTH.gluteAt - CANON.hip, tiltP)],
+            k: G(BLEND.glute) }))
+        ] });
 
-  // Two glutes rather than one mass, because the cleft between them is the
-  // shape: one ellipsoid across the back of the pelvis is a shelf.
-  for (const side of [1, -1])
-    add({ name: `glute.${side > 0 ? 'L' : 'R'}`, parent: 'pelvis',
-          offset: [side * L(GIRTH.gluteOut), -L(GIRTH.gluteBack),
-                   rise(GIRTH.gluteAt - CANON.hip, tiltP)],
-          mass: { kind: 'ellipsoid',
-                  half: [G(GIRTH.gluteHalf[0]), G(GIRTH.gluteHalf[1]) * gluteFull,
-                         G(GIRTH.gluteHalf[2])],
-                  k: G(BLEND.glute) } });
+  add({ name: 'lumbar', parent: 'pelvis', offset: [0, 0, rise(0.075, tiltP)],
+        rot: bend(SPINE.lumbar),
+        mass: [
+          { kind: 'ellipsoid',
+            half: [G(GIRTH.waistHalf[0]) * waistNarrow,
+                   G(GIRTH.waistHalf[1]) * waistNarrow, G(GIRTH.waistHalf[2])],
+            offset: [0, 0, rise(GIRTH.waistAt - CANON.hip - 0.075, tiltL)],
+            k: G(BLEND.waist) },
+          { kind: 'ellipsoid',
+            half: [G(GIRTH.bellyHalf[0]) * waistNarrow, G(GIRTH.bellyHalf[1]),
+                   G(GIRTH.bellyHalf[2])],
+            offset: [0, L(GIRTH.bellyFwd), rise(GIRTH.bellyAt - CANON.hip - 0.075, tiltL)],
+            k: G(BLEND.belly) }
+        ] });
 
-  add({ name: 'lumbar', parent: 'pelvis', offset: [0, 0, rise(0.075, tiltP)], rot: bend(SPINE.lumbar),
-        mass: { kind: 'ellipsoid',
-                half: [G(GIRTH.waistHalf[0]) * waistNarrow,
-                       G(GIRTH.waistHalf[1]) * waistNarrow, G(GIRTH.waistHalf[2])],
-                offset: [0, 0, rise(GIRTH.waistAt - CANON.hip - 0.075, tiltL)],
-                k: G(BLEND.waist) } });
-
-  add({ name: 'belly', parent: 'lumbar', offset: [0, 0, 0],
-        mass: { kind: 'ellipsoid',
-                half: [G(GIRTH.bellyHalf[0]) * waistNarrow, G(GIRTH.bellyHalf[1]),
-                       G(GIRTH.bellyHalf[2])],
-                offset: [0, L(GIRTH.bellyFwd), rise(GIRTH.bellyAt - CANON.hip - 0.075, tiltL)],
-                k: G(BLEND.belly) } });
-
-  add({ name: 'thorax', parent: 'lumbar', offset: [0, 0, rise(0.075, tiltL)], rot: bend(SPINE.thorax),
-        mass: { kind: 'ellipsoid', half: G3(GIRTH.thoraxHalf),
-                offset: [0, 0, rise(GIRTH.thoraxAt - CANON.hip - 0.150, tiltT)],
-                k: G(BLEND.thorax) } });
-
-  add({ name: 'sternum', parent: 'thorax', offset: [0, 0, 0],
-        mass: { kind: 'ellipsoid', half: G3(GIRTH.sternumHalf),
-                offset: [0, L(GIRTH.sternumFwd), rise(GIRTH.sternumAt - CANON.hip - 0.150, tiltT)],
-                k: G(BLEND.sternum) } });
-
-  for (const side of [1, -1]) {
-    const s = side > 0 ? 'L' : 'R';
-    add({ name: `pec.${s}`, parent: 'thorax',
-          offset: [side * L(GIRTH.pecOut), L(GIRTH.pecFwd),
-                   rise(GIRTH.pecAt - CANON.hip - 0.150, tiltT)],
-          mass: { kind: 'ellipsoid', half: G3(GIRTH.pecHalf), k: G(BLEND.pec) } });
-    add({ name: `lat.${s}`, parent: 'thorax',
-          offset: [side * L(GIRTH.latOut), 0, rise(GIRTH.latAt - CANON.hip - 0.150, tiltT)],
-          mass: { kind: 'ellipsoid', half: G3(GIRTH.latHalf), k: G(BLEND.lat) } });
-    if (bust > 0)
-      add({ name: `bust.${s}`, parent: 'thorax',
-            offset: [side * L(0.043), L(GIRTH.bustFwd),
-                     rise(GIRTH.bustAt - CANON.hip - 0.150, tiltT)],
-            mass: { kind: 'ellipsoid',
-                    half: [G(GIRTH.bustHalf[0]) * bust, G(GIRTH.bustHalf[1]) * bust,
-                           G(GIRTH.bustHalf[2]) * bust],
-                    k: G(BLEND.bust) } });
-  }
-
-  // A capsule laid across the top of the thorax, ending at each shoulder joint
-  // -- so the deltoids are concentric with its ends and everything from the
-  // sternum out to the arm is one blended run.
   const shoulderX = shoulderHalf * 0.92;
   const yokeX = shoulderX * GIRTH.yokeSpan;
-  add({ name: 'yoke', parent: 'thorax',
-        offset: [-yokeX, 0, rise(GIRTH.yokeAt - CANON.hip - 0.150, tiltT)],
-        rot: [0, 90, 0],                         // its own +Z laid along +X
-        mass: { kind: 'bone', len: 2 * yokeX, aspect: GIRTH.yokeAsp,
-                r0: G(GIRTH.yokeR), r1: G(GIRTH.yokeR), k: G(BLEND.yoke) } });
+  const upZ = (f) => rise(f - CANON.hip - 0.150, tiltT);
+  add({ name: 'thorax', parent: 'lumbar', offset: [0, 0, rise(0.075, tiltL)],
+        rot: bend(SPINE.thorax),
+        mass: [
+          { kind: 'ellipsoid', half: G3(GIRTH.thoraxHalf),
+            offset: [0, 0, upZ(GIRTH.thoraxAt)], k: G(BLEND.thorax) },
+          { kind: 'ellipsoid', half: G3(GIRTH.sternumHalf),
+            offset: [0, L(GIRTH.sternumFwd), upZ(GIRTH.sternumAt)], k: G(BLEND.sternum) },
+          ...[1, -1].flatMap(side => [
+            { kind: 'ellipsoid', half: G3(GIRTH.pecHalf),
+              offset: [side * L(GIRTH.pecOut), L(GIRTH.pecFwd), upZ(GIRTH.pecAt)],
+              k: G(BLEND.pec) },
+            { kind: 'ellipsoid', half: G3(GIRTH.latHalf),
+              offset: [side * L(GIRTH.latOut), 0, upZ(GIRTH.latAt)], k: G(BLEND.lat) },
+            { kind: 'ellipsoid', half: G3(GIRTH.scapHalf),
+              offset: [side * L(GIRTH.scapOut), -L(GIRTH.scapBack), upZ(GIRTH.scapAt)],
+              k: G(BLEND.scap) },
+            ...(bust > 0 ? [{ kind: 'ellipsoid',
+              half: [G(GIRTH.bustHalf[0]) * bust, G(GIRTH.bustHalf[1]) * bust,
+                     G(GIRTH.bustHalf[2]) * bust],
+              offset: [side * L(0.043), L(GIRTH.bustFwd), upZ(GIRTH.bustAt)],
+              k: G(BLEND.bust) }] : [])
+          ]),
+          // A capsule laid across the top of the thorax, so the deltoids are
+          // near its ends and everything from sternum to arm is one blended run.
+          { kind: 'bone', len: 2 * yokeX, aspect: GIRTH.yokeAsp,
+            r0: G(GIRTH.yokeR), r1: G(GIRTH.yokeR), rot: [0, 90, 0],
+            offset: [-yokeX, 0, upZ(GIRTH.yokeAt)], k: G(BLEND.yoke) },
+          // the trapezius over the top of it, which is the slope from neck to
+          // shoulder seen from behind
+          { kind: 'ellipsoid', half: G3(GIRTH.trapHalf),
+            offset: [0, -L(GIRTH.trapBack), upZ(GIRTH.trapAt)], k: G(BLEND.trap) }
+        ] });
 
   // ---- neck and head -----------------------------------------------------
   add({ name: 'neck', parent: 'thorax',
-        offset: [0, L(GIRTH.neckFwd), rise(CANON.shoulder - CANON.hip - 0.150, tiltT)],
-        rot: bend(SPINE.neck),
+        offset: [0, L(GIRTH.neckFwd), upZ(CANON.shoulder)], rot: bend(SPINE.neck),
         mass: { kind: 'bone', len: L(CANON.chin - CANON.shoulder) * 1.15,
                 r0: G(GIRTH.neckBase), r1: G(GIRTH.neckTop),
                 aspect: GIRTH.neckAsp, k: G(BLEND.neck) } });
 
   add({ name: 'head', parent: 'neck', offset: [0, 0, L(CANON.chin - CANON.shoulder)],
-        mass: { kind: 'ellipsoid', half: G3(GIRTH.craniumHalf),
-                offset: [0, -L(GIRTH.craniumBack),
-                         L(GIRTH.craniumAt - CANON.chin)],
-                k: G(BLEND.cranium) } });
-
-  add({ name: 'jaw', parent: 'head', offset: [0, 0, 0],
-        mass: { kind: 'ellipsoid', half: G3(GIRTH.jawHalf),
-                offset: [0, L(GIRTH.jawFwd), L(GIRTH.jawAt - CANON.chin)],
-                k: G(BLEND.jaw) } });
+        mass: [
+          { kind: 'ellipsoid', half: G3(GIRTH.craniumHalf),
+            offset: [0, -L(GIRTH.craniumBack), L(GIRTH.craniumAt - CANON.chin)],
+            k: G(BLEND.cranium) },
+          { kind: 'ellipsoid', half: G3(GIRTH.jawHalf),
+            offset: [0, L(GIRTH.jawFwd), L(GIRTH.jawAt - CANON.chin)], k: G(BLEND.jaw) }
+        ] });
 
   // ---- arms --------------------------------------------------------------
   // A limb connector's rest rotation aims its own +Z down the segment, so
@@ -388,6 +400,10 @@ function mannequin(opts) {
   // figure's left at +X, which makes the two rules above true rather than
   // approximately true. On a limb, local +Y is then the sagittal axis, which
   // is the one a cross-section aspect flattens.
+  //
+  // Three joints an arm, and the muscles ride on them: an arm articulates at
+  // the shoulder, the elbow and the wrist and nowhere else, however many
+  // shapes it takes to make one look like an arm.
   const upper = L(CANON.upperArm), fore = L(CANON.forearm);
   for (const side of [1, -1]) {
     const s = side > 0 ? 'L' : 'R';
@@ -397,49 +413,52 @@ function mannequin(opts) {
           // 0.632, and the table says 0.630. Dropping the joint to its true
           // centre below the acromion would be more correct about the shoulder
           // and less correct about everything hanging off it.
-          offset: [side * shoulderX, 0, rise(CANON.shoulder - CANON.hip - 0.150, tiltT)],
+          offset: [side * shoulderX, 0, upZ(CANON.shoulder)],
           rot: [180 - tiltT, 0, 0], pose: [0, side * P.armLift, 0],
-          mass: { kind: 'bone', len: upper - L(GIRTH.upperArmDrop),
-                  aspect: GIRTH.upperArmAsp, offset: [0, 0, L(GIRTH.upperArmDrop)],
-                  r0: G(GIRTH.upperArm0), r1: G(GIRTH.upperArm1),
-                  k: G(BLEND.upperArm) } });
-
-    // the deltoid caps the shoulder rather than sitting on it: an ellipsoid
-    // running a third of the way down the arm, which is the shape that reads
-    // as a shoulder from any angle
-    add({ name: `deltoid.${s}`, parent: `shoulder.${s}`,
-          offset: [0, 0, L(GIRTH.deltoidAt)],
-          mass: { kind: 'ellipsoid', half: G3(GIRTH.deltoidHalf), k: G(BLEND.deltoid) } });
-
-    add({ name: `biceps.${s}`, parent: `shoulder.${s}`, offset: [0, 0, upper * GIRTH.bicepsAt],
-          mass: { kind: 'ellipsoid', half: G3(GIRTH.bicepsHalf),
-                  offset: [0, -L(GIRTH.bicepsFwd), 0], k: G(BLEND.biceps) } });
+          mass: [
+            { kind: 'bone', len: upper - L(GIRTH.upperArmDrop),
+              aspect: GIRTH.upperArmAsp, offset: [0, 0, L(GIRTH.upperArmDrop)],
+              r0: G(GIRTH.upperArm0), r1: G(GIRTH.upperArm1), k: G(BLEND.upperArm) },
+            // the deltoid caps the shoulder rather than sitting on it: an
+            // ellipsoid running a third of the way down the arm, which is the
+            // shape that reads as a shoulder from any angle
+            { kind: 'ellipsoid', half: G3(GIRTH.deltoidHalf),
+              offset: [0, 0, L(GIRTH.deltoidAt)], k: G(BLEND.deltoid) },
+            { kind: 'ellipsoid', half: G3(GIRTH.bicepsHalf),
+              offset: [0, -L(GIRTH.bicepsFwd), upper * GIRTH.bicepsAt],
+              k: G(BLEND.biceps) },
+            // and the triceps behind it, lower: an upper arm with only a
+            // biceps is round from behind and reads as a sausage
+            { kind: 'ellipsoid', half: G3(GIRTH.tricepHalf),
+              offset: [0, L(GIRTH.tricepBack), upper * GIRTH.tricepAt],
+              k: G(BLEND.tricep) }
+          ] });
 
     add({ name: `elbow.${s}`, parent: `shoulder.${s}`, offset: [0, 0, upper],
           pose: [P.elbow, 0, 0],
-          mass: { kind: 'bone', len: fore, aspect: GIRTH.forearmAsp,
-                  r0: G(GIRTH.forearm0), r1: G(GIRTH.forearm1), k: G(BLEND.forearm) } });
-
-    add({ name: `flexor.${s}`, parent: `elbow.${s}`, offset: [0, 0, fore * GIRTH.flexorAt],
-          mass: { kind: 'ellipsoid', half: G3(GIRTH.flexorHalf), k: G(BLEND.flexor) } });
+          mass: [
+            { kind: 'bone', len: fore, aspect: GIRTH.forearmAsp,
+              r0: G(GIRTH.forearm0), r1: G(GIRTH.forearm1), k: G(BLEND.forearm) },
+            { kind: 'ellipsoid', half: G3(GIRTH.flexorHalf),
+              offset: [0, 0, fore * GIRTH.flexorAt], k: G(BLEND.flexor) }
+          ] });
 
     add({ name: `wrist.${s}`, parent: `elbow.${s}`, offset: [0, 0, fore],
           pose: [P.wrist, 0, 0],
-          mass: { kind: 'bone', len: L(GIRTH.palmLen), aspect: GIRTH.palmAsp,
-                  r0: G(GIRTH.palmR0), r1: G(GIRTH.palmR1), k: G(BLEND.palm) } });
-
-    add({ name: `fingers.${s}`, parent: `wrist.${s}`, offset: [0, 0, L(GIRTH.palmLen)],
-          mass: { kind: 'box', half: G3(GIRTH.fingerHalf),
-                  round: G(GIRTH.fingerHalf[1]) * 0.9,
-                  offset: [0, 0, G(GIRTH.fingerHalf[2])], k: G(BLEND.finger) } });
-
-    // A thumb is one mass and it is most of what separates a hand from a
-    // paddle, so a lay figure has one even though it has no fingers.
-    add({ name: `thumb.${s}`, parent: `wrist.${s}`,
-          offset: [side * G(GIRTH.palmR1) * 0.7, 0, L(GIRTH.palmLen) * 0.45],
-          rot: [0, side * GIRTH.thumbOut, 0],
-          mass: { kind: 'bone', len: L(GIRTH.thumbLen),
-                  r0: G(GIRTH.thumbR0), r1: G(GIRTH.thumbR1), k: G(BLEND.thumb) } });
+          mass: [
+            // A mannequin's hand is a mitten, but a mitten with a palm, a thumb
+            // and a taper is a hand and a rounded slab is not.
+            { kind: 'bone', len: L(GIRTH.palmLen), aspect: GIRTH.palmAsp,
+              r0: G(GIRTH.palmR0), r1: G(GIRTH.palmR1), k: G(BLEND.palm) },
+            { kind: 'box', half: G3(GIRTH.fingerHalf),
+              round: G(GIRTH.fingerHalf[1]) * 0.9,
+              offset: [0, 0, L(GIRTH.palmLen) + G(GIRTH.fingerHalf[2])],
+              k: G(BLEND.finger) },
+            { kind: 'bone', len: L(GIRTH.thumbLen),
+              r0: G(GIRTH.thumbR0), r1: G(GIRTH.thumbR1), rot: [0, side * GIRTH.thumbOut, 0],
+              offset: [side * G(GIRTH.palmR1) * 0.7, 0, L(GIRTH.palmLen) * 0.45],
+              k: G(BLEND.thumb) }
+          ] });
   }
 
   // ---- legs --------------------------------------------------------------
@@ -448,38 +467,47 @@ function mannequin(opts) {
     const s = side > 0 ? 'L' : 'R';
     add({ name: `hip.${s}`, parent: 'pelvis', offset: [side * L(0.048), 0, 0],
           rot: [180 - tiltP, 0, 0], pose: [0, side * P.legSpread, 0],
-          mass: { kind: 'bone', len: thigh, aspect: GIRTH.thighAsp,
-                  r0: G(GIRTH.thigh0), r1: G(GIRTH.thigh1), k: G(BLEND.thigh) } });
-
-    add({ name: `quad.${s}`, parent: `hip.${s}`, offset: [0, 0, thigh * GIRTH.quadAt],
-          mass: { kind: 'ellipsoid', half: G3(GIRTH.quadHalf),
-                  offset: [0, -L(GIRTH.quadFwd), 0], k: G(BLEND.quad) } });
+          mass: [
+            { kind: 'bone', len: thigh, aspect: GIRTH.thighAsp,
+              r0: G(GIRTH.thigh0), r1: G(GIRTH.thigh1), k: G(BLEND.thigh) },
+            { kind: 'ellipsoid', half: G3(GIRTH.quadHalf),
+              offset: [0, -L(GIRTH.quadFwd), thigh * GIRTH.quadAt], k: G(BLEND.quad) },
+            // the hamstring behind and higher, which is what gives a thigh its
+            // taper: thickest at the top and behind, not down the middle
+            { kind: 'ellipsoid', half: G3(GIRTH.hamHalf),
+              offset: [0, L(GIRTH.hamBack), thigh * GIRTH.hamAt], k: G(BLEND.ham) }
+          ] });
 
     add({ name: `knee.${s}`, parent: `hip.${s}`, offset: [0, 0, thigh],
-          mass: { kind: 'bone', len: shank, aspect: GIRTH.shankAsp,
-                  r0: G(GIRTH.shank0), r1: G(GIRTH.shank1), k: G(BLEND.shank) } });
-
-    // The gastrocnemius: high, behind, and the single most visible mass on a
-    // leg. Left out, the back of the shank runs straight from knee to ankle
-    // and the whole leg reads as a chair leg.
-    add({ name: `calf.${s}`, parent: `knee.${s}`, offset: [0, 0, shank * GIRTH.calfAt],
-          mass: { kind: 'ellipsoid', half: G3(GIRTH.calfHalf),
-                  offset: [0, L(GIRTH.calfBack), 0], k: G(BLEND.calf) } });
+          mass: [
+            { kind: 'bone', len: shank, aspect: GIRTH.shankAsp,
+              r0: G(GIRTH.shank0), r1: G(GIRTH.shank1), k: G(BLEND.shank) },
+            // The gastrocnemius: high, behind, and the single most visible mass
+            // on a leg. Left out, the back of the shank runs straight from knee
+            // to ankle and the whole leg reads as a chair leg.
+            { kind: 'ellipsoid', half: G3(GIRTH.calfHalf),
+              offset: [0, L(GIRTH.calfBack), shank * GIRTH.calfAt], k: G(BLEND.calf) },
+            { kind: 'ellipsoid', half: G3(GIRTH.shinHalf),
+              offset: [0, -L(GIRTH.shinFwd), shank * GIRTH.shinAt], k: G(BLEND.shin) },
+            { kind: 'ellipsoid', half: G3(GIRTH.achilHalf),
+              offset: [0, L(GIRTH.achilBack), shank * GIRTH.achilAt], k: G(BLEND.achil) }
+          ] });
 
     // The ankle's frame still points +Z at the floor, so the foot's own
     // rotation lays its axis along the world's +Y -- the way the figure faces
     // -- and its offset is stated in the ankle's frame, where forward is -Y
     // and down is +Z.
     add({ name: `ankle.${s}`, parent: `knee.${s}`, offset: [0, 0, shank],
-          mass: { kind: 'bone', len: L(GIRTH.footLen), aspect: GIRTH.footAsp,
-                  r0: G(GIRTH.footR0), r1: G(GIRTH.footR1), rot: [90, 0, 0],
-                  offset: [0, L(GIRTH.footBack), L(CANON.ankle) - G(GIRTH.footR1) * GIRTH.footAsp],
-                  k: G(BLEND.foot) } });
-
-    add({ name: `heel.${s}`, parent: `knee.${s}`, offset: [0, 0, shank],
-          mass: { kind: 'ellipsoid', half: G3(GIRTH.heelHalf), rot: [180, 0, 0],
-                  offset: [0, L(GIRTH.footBack), L(CANON.ankle) - L(GIRTH.heelAt)],
-                  k: G(BLEND.heel) } });
+          mass: [
+            { kind: 'bone', len: L(GIRTH.footLen), aspect: GIRTH.footAsp,
+              r0: G(GIRTH.footR0), r1: G(GIRTH.footR1), rot: [90, 0, 0],
+              offset: [0, L(GIRTH.footBack),
+                       L(CANON.ankle) - G(GIRTH.footR1) * GIRTH.footAsp],
+              k: G(BLEND.foot) },
+            { kind: 'ellipsoid', half: G3(GIRTH.heelHalf), rot: [180, 0, 0],
+              offset: [0, L(GIRTH.footBack), L(CANON.ankle) - L(GIRTH.heelAt)],
+              k: G(BLEND.heel) }
+          ] });
   }
 
   return { name: o.name || 'mannequin', joints,
