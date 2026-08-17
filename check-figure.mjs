@@ -258,6 +258,47 @@ console.log('\nthe masses that make it a body are in it');
      + `a ratio of ${(dp / w).toFixed(2)} against the table's ${FG.GIRTH.forearmAsp}`);
 }
 
+// The trunk's silhouette, which is a shape rather than a measurement and so
+// needs asking of the solid. Three claims, and the third is the one that was
+// wrong: an hourglass is not two widths and a narrow bit, it is a *curve*
+// between them. Matched to the thigh tops the hip stops being a hip -- the
+// widest part of the figure becomes the legs, the outline runs dead flat from
+// mid-thigh to the iliac crest, and all that is left of a waist is the step
+// where the flat ends.
+console.log('\nthe trunk is an hourglass, and the hourglass is a curve');
+{
+  const H = 1750;
+  const F = figure({ height: H, pose: 't' });   // arms clear of the trunk
+  const y = F.joint('hip.L')[1];
+  const w = (f) => 2 * (across(F, f * H, y) || 0);
+
+  let waist = Infinity, waistAt = 0, hip = 0, hipAt = 0;
+  for (let f = 0.60; f <= 0.70; f += 0.005)
+    if (w(f) < waist) { waist = w(f); waistAt = f; }
+  for (let f = 0.48; f <= 0.60; f += 0.005)
+    if (w(f) > hip) { hip = w(f); hipAt = f; }
+  const chest = w(0.75);
+
+  ok(chest / waist > 1.25 && hip / waist > 1.25,
+     `chest ${chest.toFixed(0)}, waist ${waist.toFixed(0)}, hip ${hip.toFixed(0)} mm — `
+     + `ratios ${(chest / waist).toFixed(2)} and ${(hip / waist).toFixed(2)}`);
+
+  // the hip's widest is above the thighs, not among them
+  const thigh = w(0.46);
+  ok(hip > thigh * 1.02 && hipAt > 0.50,
+     `the hips are widest at ${hipAt.toFixed(3)}H and stand ${(hip - thigh).toFixed(0)} mm `
+     + `proud of the thighs below them`);
+
+  // and no slice of the run from hip to waist is a step
+  let worst = 0, worstAt = 0;
+  for (let f = hipAt; f < waistAt; f += 0.01) {
+    const step = Math.abs(w(f + 0.01) - w(f));
+    if (step > worst) { worst = step; worstAt = f; }
+  }
+  ok(worst < 0.030 * H, `and the run from hip to waist is a curve: the steepest `
+    + `slice loses ${worst.toFixed(0)} mm per 0.01H, at ${worstAt.toFixed(2)}H`);
+}
+
 // The spine's S is a pose parameter, so it can be turned off -- and a figure
 // with it off has to be a straight column rather than a broken one.
 console.log('\nthe spine curves, and can be told not to');

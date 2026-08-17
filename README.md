@@ -837,6 +837,17 @@ plus a sternum and pectorals across the front and a latissimus up each side.
 A body's silhouette is the run of curves between them, and it is the first
 thing missing when a figure reads as a doll.
 
+Two things make that run an **hourglass** rather than a slab with a step in it,
+and both were wrong first. The pelvis has to be *wider than the thigh tops and
+centred above them*: matched to them it is not a hip at all — the widest part of
+the figure becomes the legs, the outline runs dead flat from mid-thigh to the
+iliac crest, and all that is left of a waist is the step where the flat ends.
+And the hip and waist masses have to **overlap** vertically by a good fraction
+of their own height, or their union necks sharply where both are thin and the
+transition is a cliff instead of a curve. `check-figure.mjs` measures all three:
+the ratios, that the hips are widest above the thighs, and that no 0.01H slice
+of the run from hip to waist loses more than 30 mm.
+
 **A gastrocnemius.** The single most visible omission on a leg: without it the
 back of the shank runs straight from knee to ankle and the whole leg reads as a
 chair leg. The same argument puts a quadriceps high and in front of the thigh

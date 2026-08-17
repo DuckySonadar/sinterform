@@ -99,11 +99,15 @@ const GIRTH = {
   // curves between them, and it is the first thing missing when a figure reads
   // as a doll. Widths and depths are separate everywhere because a trunk is
   // half again as wide as it is deep and nothing about it is a circle.
-  pelvisHalf:  [0.0955, 0.0520, 0.0500], pelvisAt:  0.552, pelvisBack: 0.0060,
+  // The pelvis is wider than the thigh tops and sits above them. Matched to
+  // them it is not a hip -- the widest part of the figure becomes the legs,
+  // the silhouette runs dead flat from mid-thigh to the iliac crest, and the
+  // only thing left of a waist is a step where the flat ends.
+  pelvisHalf:  [0.1015, 0.0545, 0.0720], pelvisAt:  0.545, pelvisBack: 0.0060,
   gluteHalf:   [0.0530, 0.0520, 0.0530], gluteAt:   0.500,
     gluteBack: 0.0330, gluteOut:  0.0430,
-  waistHalf:   [0.0700, 0.0460, 0.0500], waistAt:   0.645,
-  bellyHalf:   [0.0610, 0.0420, 0.0540], bellyAt:   0.607, bellyFwd: 0.0090,
+  waistHalf:   [0.0615, 0.0425, 0.0720], waistAt:   0.650,
+  bellyHalf:   [0.0565, 0.0400, 0.0500], bellyAt:   0.612, bellyFwd: 0.0090,
   thoraxHalf:  [0.0880, 0.0555, 0.0740], thoraxAt:  0.746,
   // The sternum is the flat of the chest and sits proud of the rib cage; the
   // pectorals are the two masses across it. Together they are what stops the
@@ -170,7 +174,7 @@ const GIRTH = {
   // cones. A gastrocnemius left out is the single most visible omission on a
   // figure: the back of the shank goes straight from knee to ankle and the
   // whole leg reads as a chair leg.
-  thigh0:      0.0470, thigh1: 0.0315, thighAsp: 1.02,
+  thigh0:      0.0450, thigh1: 0.0315, thighAsp: 1.02,
   quadHalf:    [0.0400, 0.0330, 0.0800], quadAt: 0.34, quadFwd: 0.0080,
   hamHalf:     [0.0360, 0.0310, 0.0800], hamAt: 0.30, hamBack: 0.0090,
   shank0:      0.0300, shank1: 0.0180, shankAsp: 0.94,
@@ -199,7 +203,7 @@ const GIRTH = {
 // lever is the radius, which is why the ones between masses that sit near
 // their opposite number -- thighs, glutes, pectorals -- are the small ones.
 const BLEND = {
-  pelvis: 0.000, glute: 0.030, waist: 0.042, belly: 0.030, thorax: 0.034,
+  pelvis: 0.000, glute: 0.030, waist: 0.030, belly: 0.024, thorax: 0.030,
   sternum: 0.026, pec: 0.020, lat: 0.024, bust: 0.024, yoke: 0.022,
   neck: 0.013, cranium: 0.010, jaw: 0.012,
   scap: 0.020, trap: 0.026,
