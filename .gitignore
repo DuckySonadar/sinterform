@@ -1,1 +1,15 @@
 .DS_Store
+
+# Two of the checks drive a real browser -- check-glsl compiles the shader and
+# compares it to the JS per point, check-viewer screenshots both halves of a
+# scene -- so running them installs Playwright here. `check-glsl.mjs` looks for
+# it at ./node_modules/playwright, which is why it lands in the repository root
+# rather than anywhere tidier.
+#
+# It is not a dependency of anything this repository ships. The kernel has
+# none: no bundler, no build step for consumers, and no package.json, which is
+# why that file is ignored too rather than committed -- npm writes one as a
+# side effect of the install and it describes nothing.
+node_modules/
+package.json
+package-lock.json
