@@ -158,6 +158,64 @@ const GLSL = {
   vec3 q = vec3(p.x, max(abs(p.z) - le, 0.0), p.y);
   return length(vec2(length(q.xy) - d.y, q.z)) - d.z;
 }` },
+  // A right triangle extruded along Z: legs d.x along +X and d.y along +Y from
+  // the right-angle corner, d.z thick, centred in its box like everything else.
+  //
+  // The hypotenuse may bow in toward the corner as a conic, and `r` is its rho
+  // -- the round slot again, for the reason a field's range uses it: this has
+  // no corner rounding and the number has to arrive somehow. roundSlot() is
+  // what fills it, from the node's `hyp` and `rho`. The conic is the CAD one:
+  // ends at the two leg tips, tangent to the legs there (so the apex is the
+  // corner), with its shoulder rho of the way from the chord's midpoint to the
+  // corner. rho 0 is the straight hypotenuse, 0.5 a parabola, above that a
+  // hyperbola, and sqrt(2) - 1 exactly the quarter ellipse centred on the far
+  // corner of the box -- which is all an "elliptical" hypotenuse is, here.
+  //
+  // As a rational quadratic Bezier the conic is (X(1-t)^2, Y t^2) over
+  // (1-t)^2 + 2wt(1-t) + t^2 with w = rho/(1-rho). The exact distance to a
+  // conic is a quartic, so instead the outline is the polygon through 32
+  // points *on* the curve and this is iq's exact polygon distance to that --
+  // a true distance function, 1-Lipschitz by construction, to a shape within
+  // a chord's sag of the conic: 0.007 mm at 20 mm legs, 0.055 mm at the
+  // 160 mm limit, under the finest mesh resolution by four times. The weight
+  // already crowds the points into the tight bend as rho rises, which is where
+  // they are needed. A straight hypotenuse takes one pass, not thirty-two.
+  //
+  // The horizontal leg never crosses a horizontal ray, so the crossing count
+  // only needs the vertical one written out beside the loop.
+  tri: { fn: 'pTri',
+    src: `float pTri(vec3 p, vec3 d, float r){
+  vec2 L = max(d.xy, vec2(1e-4));
+  vec2 q = p.xy + 0.5*L;
+  float rho = clamp(r, 0.0, 0.95);
+  float wt = rho/(1.0 - rho);
+  int n = (wt > 0.0) ? 32 : 1;
+  float dt = (wt > 0.0) ? 1.0/32.0 : 1.0;
+  vec2 lx = q - vec2(clamp(q.x, 0.0, L.x), 0.0);
+  vec2 ly = q - vec2(0.0, clamp(q.y, 0.0, L.y));
+  float dd = min(dot(lx, lx), dot(ly, ly));
+  bool ins = q.x < 0.0 && q.y >= 0.0 && q.y < L.y;
+  vec2 a = vec2(L.x, 0.0);
+  float t = 0.0;
+  for (int i = 0; i < n; i++) {
+    t += dt;
+    float u = 1.0 - t;
+    float den = u*u + 2.0*wt*t*u + t*t;
+    vec2 b = vec2(L.x*u*u, L.y*t*t)/den;
+    vec2 e = b - a;
+    vec2 w = q - a;
+    vec2 h = w - e*clamp(dot(w, e)/dot(e, e), 0.0, 1.0);
+    dd = min(dd, dot(h, h));
+    bool c1 = q.y >= a.y;
+    bool c2 = q.y < b.y;
+    float cr = e.x*w.y - e.y*w.x;
+    if ((c1 && c2 && cr > 0.0) || (!c1 && !c2 && cr < 0.0)) ins = !ins;
+    a = b;
+  }
+  float da = (ins ? -1.0 : 1.0)*sqrt(dd);
+  float db = abs(p.z) - 0.5*d.z;
+  return min(max(da, db), 0.0) + length(max(vec2(da, db), 0.0));
+}` },
   plane: { fn: 'pPlane',
     src: 'float pPlane(vec3 p, vec3 d, float r){ return p.z; }' },
   // The odd one out twice over. It takes a sampler, which `call` knows about

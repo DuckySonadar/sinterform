@@ -1,8 +1,8 @@
 # SinterForm
 
 A signed-distance geometry kernel for solid modelling: primitives, booleans
-with smooth blends, baked distance fields, a surface-nets mesher and binary
-STL output. Dependency-free JavaScript.
+with smooth blends, baked distance fields, a surface-nets mesher, binary STL
+output and STL input. Dependency-free JavaScript.
 
 | file | what |
 | --- | --- |
@@ -162,6 +162,7 @@ these are the fields the kernel reads:
 | `b` | which body it belongs to |
 | `mx`, `my`, `mz` | mirror across that axis (evaluates at `abs` of the coordinate) |
 | `fi` | which document entry: a `field`, a `profile`'s outline, or a `wire`'s path |
+| `hyp`, `rho` | a right triangle's hypotenuse: `'line'`, `'conic'` (bowed in by `rho`) or `'ellipse'` |
 
 Shapes fold in order: each one is combined with the running distance so far,
 so a `cut` removes what is already there and the order of the list matters.
@@ -242,6 +243,22 @@ meshToSTL(mesh, header) → Blob
 Binary STL. `header` is truncated to the 80 bytes the format allows.
 
 ```js
+parseSTL(bytes) → { tris, count, lo, hi }
+meshField(tris, opts) → { field, centre }
+```
+The other direction. `parseSTL` takes an `ArrayBuffer` or `Uint8Array` of
+binary or ASCII STL — decided by size, since a binary header that begins
+`solid` is common — and returns the triangles as nine floats each, in the
+file's own units, with their bounds. `meshField` samples a triangle soup into a
+baked field (see *Baked fields*): `opts.res` is the grid spacing in mm (default
+0.8), `opts.range` the ± quantisation range (8), `opts.pad` the margin around
+the mesh, `opts.maxSamples` the guard (24 M), `opts.name` the library name.
+`centre` is where the field's middle sits in the mesh's coordinates — put a
+`field` node there and the shape lands where the file had it. Scale the
+triangles *before* baking: a field's distances are millimetres and do not
+stretch with its box.
+
+```js
 smin(a, b, k) · smax(a, b, k)
 ```
 Polynomial smooth min and max, the blend behind `k`. Both fall back to plain
@@ -277,13 +294,17 @@ into the function rather than passed to it. The uniform *expressions* are the
 caller's, which is what keeps the packing out of here.
 
 One thing a consumer does have to know: **a baked field takes its `range`
-through the slot every other primitive uses for corner rounding.** A field has
-no rounding and the range has to arrive somehow. Do not reimplement that rule —
-ask for it:
+through the slot every other primitive uses for corner rounding,** and so does
+the right triangle its hypotenuse's rho. Neither has rounding, and the number
+has to arrive somehow. Do not reimplement that rule — ask for it:
 
 ```js
-uData[b + 7] = SinterForm.roundSlot(node);   // rounding, or a field's range
+uData[b + 7] = SinterForm.roundSlot(node);   // rounding, a field's range, or a rho
 ```
+
+`triRho(node)` is the triangle's half of it on its own: `'line'` (or nothing)
+is 0, `'ellipse'` is √2 − 1, `'conic'` is the node's `rho` clamped to
+`[0, TRI_RHO_MAX]`.
 
 `sceneSDF` asks the same function, so the two halves cannot disagree about
 what is in that uniform. Packing `round` there by hand gives a field multiplied
@@ -350,7 +371,7 @@ The generator parses the subset of GLSL ES 3.0 the primitives actually use —
 outside that subset is a **parse error rather than a silent mistranslation**,
 which is the property that matters.
 
-**Nothing is excluded.** All nineteen primitives are generated, including the
+**Nothing is excluded.** All twenty primitives are generated, including the
 ones that read data rather than computing from their dims. The one thing a
 shader and JavaScript genuinely cannot share is *how they reach that data* — one
 asks a sampler or reads items compiled into its own source, the other indexes an
@@ -489,6 +510,24 @@ whole array when it loads or imports a document. Assign to
 that local to be seen. A copied reference leaves the two sides looking at
 different arrays, and the symptom — a baked shape rendering as the one you
 opened before — is slow to trace back here.
+
+**A field from a mesh.** `meshField` is how an STL becomes one. It works in
+three passes. *Sign* first: rays down every grid row on all three axes, a
+sample inside on a ray when the crossings so far are odd *or* the winding number
+is not zero — parity forgives a few flipped triangles, winding forgives two
+shells overlapping, the two faults STLs from elsewhere really have — and the
+axes vote two of three. *Distance* next: exact point-to-triangle distance in a
+band three cells thick, then eight sweeps that hand each cell its neighbours'
+nearest triangles to measure afresh, so the number out to the edge of the range
+is a distance to the mesh rather than a count of grid steps. A face found to
+have solid on both sides — buried by an overlapping shell — is not surface and
+is skipped. Then the bytes, encoded as any bake is.
+
+At the grid nodes that is the brute-force distance to the mesh within 0.031 mm
+for big flat faces (the encoding's half step) and 0.055 mm for a curved mesh of
+small triangles; between nodes the trilinear read rounds over creases and
+convex edges by up to about 0.4 of the spacing, which is true of every baked
+field. `check-stl.mjs` measures both.
 
 ### Profiles
 
@@ -1263,6 +1302,27 @@ The last two are the ones that bite quietly. A primitive that over-estimates
 distance looks perfectly fine on screen and makes the marcher tunnel through
 thin features *somewhere else in the scene*. The run ends by printing the
 loosest primitive and the maximum safe raymarch step it implies.
+
+The right triangle is run once per kind of hypotenuse — straight, the ellipse, a
+parabola, a tight hyperbola — since its curve rides in the round slot and the
+default run would only ever test the straight one. It then gets a check of its
+own: points on the true conic must read as surface to within the chord sag
+`pTri` promises, and `hyp: 'ellipse'` must be the quarter ellipse centred on
+the box's far corner.
+
+### `check-stl.mjs` — is an STL read back in the shape that went out?
+
+```
+node check-stl.mjs
+```
+
+Shapes meshed by the kernel and written by `meshToSTL` go back through
+`parseSTL` and `meshField`, and the field is held to brute-force distance to
+the same triangles — at the grid nodes, where it is meshField's own answer, and
+between them, where the sampler interpolates — and to `sceneSDF`'s sign. Then
+the faults: a cube whose faces lie on the grid lines, two cubes overlapping
+without a union, a face wound backwards, ASCII, a binary header that says
+`solid`, and junk. About a minute, nearly all of it the brute force.
 
 ### `check-construct.mjs` — is the packing what the skeleton said?
 
