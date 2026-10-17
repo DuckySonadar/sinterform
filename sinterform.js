@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Primitives, boolean operations with smooth blends, bodies, baked distance
- * fields, a surface-nets mesher and binary STL output. No DOM, no WebGL, no
+ * fields, a surface-nets mesher, and STL out and in. No DOM, no WebGL, no
  * storage: it computes geometry and hands it back. That is what makes it
  * liftable into its own repository, and what keeps it usable from node --
  * which is how it gets tested.
@@ -684,6 +684,49 @@ const TWINS = {
     let q_0 = p_0, q_1 = Math.max((Math.abs(p_2) - le), 0.0), q_2 = p_1;
     return (Math.hypot((Math.hypot(q_0, q_1) - d_1), q_2) - d_2);
   },
+  // pTri — from GLSL.tri.src
+  tri: (p, d, r) => {
+    let p_0 = p[0], p_1 = p[1], p_2 = p[2];
+    let d_0 = d[0], d_1 = d[1], d_2 = d[2];
+    let L_0 = Math.max(d_0, 1e-4), L_1 = Math.max(d_1, 1e-4);
+    let q_0 = (p_0 + (0.5 * L_0)), q_1 = (p_1 + (0.5 * L_1));
+    let rho = Math.min(Math.max(r, 0.0), 0.95);
+    let wt = (rho / (1.0 - rho));
+    const t0 = (wt > 0.0);
+    let n = (t0 ? 32 : 1);
+    const t1 = (wt > 0.0);
+    let dt = (t1 ? (1.0 / 32.0) : 1.0);
+    let lx_0 = (q_0 - Math.min(Math.max(q_0, 0.0), L_0)), lx_1 = (q_1 - 0.0);
+    let ly_0 = (q_0 - 0.0), ly_1 = (q_1 - Math.min(Math.max(q_1, 0.0), L_1));
+    let dd = Math.min((lx_0*lx_0 + lx_1*lx_1), (ly_0*ly_0 + ly_1*ly_1));
+    let ins = (((q_0 < 0.0) && (q_1 >= 0.0)) && (q_1 < L_1));
+    let a_0 = L_0, a_1 = 0.0;
+    let t = 0.0;
+    let i = 0;
+    for (; (i < n);) {
+      t += dt;
+      let u = (1.0 - t);
+      let den = (((u * u) + (((2.0 * wt) * t) * u)) + (t * t));
+      let b_0 = (((L_0 * u) * u) / den), b_1 = (((L_1 * t) * t) / den);
+      let e_0 = (b_0 - a_0), e_1 = (b_1 - a_1);
+      let w_0 = (q_0 - a_0), w_1 = (q_1 - a_1);
+      const t2 = Math.min(Math.max(((w_0*e_0 + w_1*e_1) / (e_0*e_0 + e_1*e_1)), 0.0), 1.0);
+      let h_0 = (w_0 - (e_0 * t2)), h_1 = (w_1 - (e_1 * t2));
+      dd = Math.min(dd, (h_0*h_0 + h_1*h_1));
+      let c1 = (q_1 >= a_1);
+      let c2 = (q_1 < b_1);
+      let cr = ((e_0 * w_1) - (e_1 * w_0));
+      if ((((c1 && c2) && (cr > 0.0)) || (((!c1) && (!c2)) && (cr < 0.0)))) {
+        ins = (!ins);
+      }
+      a_0 = b_0;
+      a_1 = b_1;
+      i += 1;
+    }
+    let da = ((ins ? (-1.0) : 1.0) * Math.sqrt(dd));
+    let db = (Math.abs(p_2) - (0.5 * d_2));
+    return (Math.min(Math.max(da, db), 0.0) + Math.hypot(Math.max(da, 0.0), Math.max(db, 0.0)));
+  },
   // pPlane — from GLSL.plane.src
   plane: (p, d, r) => {
     let p_0 = p[0], p_1 = p[1], p_2 = p[2];
@@ -1033,6 +1076,19 @@ const PRIMS = {
     js: TWINS.link,
     ext: d => [d[1] + d[2], d[2], Math.max(d[0] / 2, d[1] + d[2])]
   },
+  tri: {
+    // A right triangle slab: the legs lie along +X and +Y from the right-angle
+    // corner, which sits at (-X/2, -Y/2) so the box is centred like every
+    // other primitive's. The hypotenuse is straight, or a conic bowed in toward
+    // the corner -- the node's `hyp` and `rho`, which reach the twins through
+    // the round slot (see roundSlot below and pTri in glsl.js).
+    name: 'Right triangle', round: false,
+    dims: [['Leg X', 0.5, 160, 0.5], ['Leg Y', 0.5, 160, 0.5],
+           ['Thickness', 0.5, 160, 0.5]],
+    def: [30, 20, 6],
+    js: TWINS.tri,
+    ext: d => [d[0] / 2, d[1] / 2, d[2] / 2]
+  },
   plane: {
     name: 'Plane cut', round: false, infinite: true,
     dims: [],
@@ -1142,9 +1198,24 @@ function dimUnit(t, i) {
 // carried its own copy of the rule, and packing `round` there by mistake gives
 // a field multiplied by zero, which draws as its bounding box and looks
 // exactly like a texture that never arrived. Now both halves ask here.
+//
+// The right triangle is the second tenant, for the same reason: it has no
+// rounding, and its hypotenuse's rho has to arrive somehow. The node says
+// which curve in words -- `hyp` is 'line', 'conic' or 'ellipse' -- and only
+// 'conic' reads `rho`, so switching to the ellipse and back keeps the rho you
+// had. An ellipse is the conic at sqrt(2) - 1, and it is written here once
+// rather than at every call site.
+const TRI_RHO_MAX = 0.95;
+function triRho(n) {
+  if (n.hyp === 'ellipse') return Math.SQRT2 - 1;
+  if (n.hyp !== 'conic') return 0;
+  const r = +n.rho;
+  return r > 0 ? Math.min(r, TRI_RHO_MAX) : 0;
+}
 function roundSlot(n) {
   if (n && n.t === 'field')
     return ((fields[(n && n.fi) || 0] || {}).range) || 0;
+  if (n && n.t === 'tri') return triRho(n);
   return (n && n.round) || 0;
 }
 
@@ -1379,6 +1450,368 @@ function meshToSTL(m, header) {
   return new Blob([buf], { type: 'model/stl' });
 }
 
+// ---------- STL in ----------
+// The other direction: a mesh made somewhere else, read and turned into a
+// baked field, so it can be cut, blended and melded like anything drawn here.
+// A field rather than a mesh primitive because the fold wants a distance at
+// every point and a mesh only says where its surface is -- the distance has to
+// be worked out once, and a grid is where the kernel keeps distances it has
+// worked out.
+
+// Binary or ASCII. A binary file whose 80-byte header happens to start with
+// "solid" is common (several CAD exporters write one), so the size is what
+// decides: a binary STL is exactly 84 + 50 bytes a triangle. Returns the
+// triangles as nine floats each, in the file's own units, and their bounds.
+function parseSTL(input) {
+  const u8 = input instanceof Uint8Array ? input : new Uint8Array(input);
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const binary = (nt) => {
+    const tris = new Float32Array(nt * 9);
+    for (let t = 0, o = 84; t < nt; t++, o += 50)
+      for (let v = 0; v < 9; v++) tris[t * 9 + v] = dv.getFloat32(o + 12 + 4 * v, true);
+    return tris;
+  };
+  let tris = null;
+  if (u8.length >= 84 && 84 + dv.getUint32(80, true) * 50 === u8.length)
+    tris = binary(dv.getUint32(80, true));
+  if (!tris) {
+    let s = '';
+    for (let i = 0; i < u8.length; i += 8192)
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+    if (/^\s*solid/.test(s) && /facet/.test(s)) {
+      const re = /vertex\s+(\S+)\s+(\S+)\s+(\S+)/g, out = [];
+      let m;
+      while ((m = re.exec(s))) out.push(+m[1], +m[2], +m[3]);
+      tris = new Float32Array(out.slice(0, out.length - out.length % 9));
+    } else if (u8.length >= 134) {
+      // a binary file with a wrong count or trailing bytes: read what is there
+      tris = binary(Math.floor((u8.length - 84) / 50));
+    }
+  }
+  if (!tris || !tris.length) throw new Error('no triangles in that file');
+  for (let i = 0; i < tris.length; i++)
+    if (!isFinite(tris[i])) throw new Error('that file has coordinates that are not numbers');
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < tris.length; i += 3)
+    for (let a = 0; a < 3; a++) {
+      if (tris[i + a] < lo[a]) lo[a] = tris[i + a];
+      if (tris[i + a] > hi[a]) hi[a] = tris[i + a];
+    }
+  return { tris, count: tris.length / 9, lo, hi };
+}
+
+// Ericson's closest point on a triangle, by Voronoi region: the triangle at
+// offset `o` in a soup of nine floats each. Writes the point into `out` and
+// returns the squared distance to it.
+function closestOnTri(T, o, px, py, pz, out) {
+  const ax = T[o], ay = T[o + 1], az = T[o + 2];
+  const bx = T[o + 3], by = T[o + 4], bz = T[o + 5];
+  const cx = T[o + 6], cy = T[o + 7], cz = T[o + 8];
+  const abx = bx - ax, aby = by - ay, abz = bz - az;
+  const acx = cx - ax, acy = cy - ay, acz = cz - az;
+  const apx = px - ax, apy = py - ay, apz = pz - az;
+  let rx, ry, rz;
+  const d1 = abx * apx + aby * apy + abz * apz;
+  const d2 = acx * apx + acy * apy + acz * apz;
+  if (d1 <= 0 && d2 <= 0) { rx = ax; ry = ay; rz = az; }
+  else {
+    const bpx = px - bx, bpy = py - by, bpz = pz - bz;
+    const d3 = abx * bpx + aby * bpy + abz * bpz;
+    const d4 = acx * bpx + acy * bpy + acz * bpz;
+    if (d3 >= 0 && d4 <= d3) { rx = bx; ry = by; rz = bz; }
+    else {
+      const vc = d1 * d4 - d3 * d2;
+      if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+        const v = d1 / (d1 - d3);
+        rx = ax + v * abx; ry = ay + v * aby; rz = az + v * abz;
+      } else {
+        const cpx = px - cx, cpy = py - cy, cpz = pz - cz;
+        const d5 = abx * cpx + aby * cpy + abz * cpz;
+        const d6 = acx * cpx + acy * cpy + acz * cpz;
+        if (d6 >= 0 && d5 <= d6) { rx = cx; ry = cy; rz = cz; }
+        else {
+          const vb = d5 * d2 - d1 * d6;
+          if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+            const w = d2 / (d2 - d6);
+            rx = ax + w * acx; ry = ay + w * acy; rz = az + w * acz;
+          } else {
+            const va = d3 * d6 - d5 * d4;
+            if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+              const w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+              rx = bx + w * (cx - bx); ry = by + w * (cy - by); rz = bz + w * (cz - bz);
+            } else {
+              const den = 1 / (va + vb + vc);
+              const v = vb * den, w = vc * den;
+              rx = ax + abx * v + acx * w;
+              ry = ay + aby * v + acy * w;
+              rz = az + abz * v + acz * w;
+            }
+          }
+        }
+      }
+    }
+  }
+  out[0] = rx; out[1] = ry; out[2] = rz;
+  const ex = px - rx, ey = py - ry, ez = pz - rz;
+  return ex * ex + ey * ey + ez * ez;
+}
+
+// A triangle soup, sampled into a field. Three passes:
+//
+//   sign      rays down every grid row, along all three axes, each counting
+//             the triangles it crosses. A sample is inside on a ray if the
+//             crossings so far are odd *or* the winding number is not zero:
+//             parity forgives a few flipped triangles, winding forgives two
+//             shells overlapping -- the two faults STLs from elsewhere
+//             actually have -- and the three axes vote, so a ray that slips
+//             through a crack is outvoted. Edges shared by two triangles are
+//             decided by one canonical edge function, so a ray landing exactly
+//             on one counts it once; the rays also sit a thousandth of a cell
+//             off the grid, so meshes on round numbers do not land on edges as
+//             a matter of course.
+//
+//   distance  exact point-to-triangle distance in a band three cells thick
+//             around every triangle, keeping the nearest *point* as well
+//             as how far it is -- and skipping faces the sign pass shows are
+//             buried, with solid on both sides. Then eight sweeps across the
+//             grid, one per octant of direction, each cell offered its upwind
+//             neighbours' nearest points. That carries the closest surface
+//             point outward to the edge of the range in O(cells) rather than
+//             O(cells x triangles), and the distance stays a distance to a real
+//             point on the mesh, never a sum of grid steps.
+//
+//   quantise  the same byte encoding bakes use, across +-range mm.
+//
+// The grid spans the mesh plus `pad`, with samples on the corners exactly --
+// the spacing is `res` and the box is whatever (n - 1) * res makes it, never
+// the other way round, or the field would be stretched by up to a cell.
+//
+// Returns { field, centre }: the library entry, and where its middle sits in
+// the mesh's own coordinates, which is where a node has to be put for the
+// shape to land where the file had it.
+function meshField(tris, opts) {
+  opts = opts || {};
+  const res = opts.res > 0 ? opts.res : 0.8;
+  const range = opts.range > 0 ? opts.range : 8;
+  const pad = opts.pad === undefined ? Math.max(2 * res, 1.5) : opts.pad;
+  const maxSamples = opts.maxSamples || 24e6;
+  const nt = Math.floor(tris.length / 9);
+  if (!nt) throw new Error('no triangles to bake');
+
+  const lo = [Infinity, Infinity, Infinity], top = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < nt * 9; i += 3)
+    for (let a = 0; a < 3; a++) {
+      if (tris[i + a] < lo[a]) lo[a] = tris[i + a];
+      if (tris[i + a] > top[a]) top[a] = tris[i + a];
+    }
+  const n = [0, 0, 0];
+  for (let a = 0; a < 3; a++) {
+    lo[a] -= pad;
+    n[a] = Math.max(2, Math.ceil((top[a] + pad - lo[a]) / res) + 1);
+  }
+  const nx = n[0], ny = n[1], nz = n[2], N = nx * ny * nz;
+  if (N > maxSamples) throw new Error(
+    `${(N / 1e6).toFixed(1)} M samples at ${res} mm — coarsen it`);
+
+  // ---- sign ----------------------------------------------------------------
+  const sJ = nz, sI = ny * nz;
+  const votes = new Uint8Array(N);
+  const stride = [sI, sJ, 1];
+  const NUDGE = [0.7548776662466927e-3, 0.5698402909980532e-3];
+  for (let A = 0; A < 3; A++) {
+    const B = (A + 1) % 3, C = (A + 2) % 3;
+    const nB = n[B], nC = n[C], oB = NUDGE[0] * res, oC = NUDGE[1] * res;
+    // which rows a triangle's shadow covers, and where along A it is crossed
+    const rows = (t, visit) => {
+      const o = 9 * t;
+      const a1 = tris[o + B], a2 = tris[o + C], b1 = tris[o + 3 + B], b2 = tris[o + 3 + C];
+      const c1 = tris[o + 6 + B], c2 = tris[o + 6 + C];
+      const area = (b1 - a1) * (c2 - a2) - (b2 - a2) * (c1 - a1);
+      if (area === 0) return;
+      const s = area > 0 ? 1 : -1;
+      const j0 = Math.max(0, Math.ceil((Math.min(a1, b1, c1) - lo[B] - oB) / res));
+      const j1 = Math.min(nB - 1, Math.floor((Math.max(a1, b1, c1) - lo[B] - oB) / res));
+      const k0 = Math.max(0, Math.ceil((Math.min(a2, b2, c2) - lo[C] - oC) / res));
+      const k1 = Math.min(nC - 1, Math.floor((Math.max(a2, b2, c2) - lo[C] - oC) / res));
+      // An edge's function is computed from its endpoints in one fixed order
+      // whichever triangle asks, so the two triangles either side of it see
+      // exactly opposite numbers and a ray on the edge goes to one of them.
+      const edge = (p1, p2, q1, q2, x1, x2) => {
+        const fwd = p1 < q1 || (p1 === q1 && p2 < q2);
+        const u1 = fwd ? p1 : q1, u2 = fwd ? p2 : q2, v1 = fwd ? q1 : p1, v2 = fwd ? q2 : p2;
+        const e = (v1 - u1) * (x2 - u2) - (v2 - u2) * (x1 - u1);
+        const sd = fwd ? s : -s;
+        const val = sd * e;
+        return val > 0 || (val === 0 && sd > 0) ? e * (fwd ? 1 : -1) : NaN;
+      };
+      for (let j = j0; j <= j1; j++) {
+        const x1 = lo[B] + j * res + oB;
+        for (let k = k0; k <= k1; k++) {
+          const x2 = lo[C] + k * res + oC;
+          const wa = edge(b1, b2, c1, c2, x1, x2);
+          if (wa !== wa) continue;
+          const wb = edge(c1, c2, a1, a2, x1, x2);
+          if (wb !== wb) continue;
+          const wc = edge(a1, a2, b1, b2, x1, x2);
+          if (wc !== wc) continue;
+          const sum = wa + wb + wc;
+          if (!sum) continue;
+          visit(j * nC + k, (wa * tris[o + A] + wb * tris[o + 3 + A] + wc * tris[o + 6 + A]) / sum,
+                area > 0 ? -1 : 1);
+        }
+      }
+    };
+    // count, then fill: one flat array of crossings, rows end to end
+    const start = new Int32Array(nB * nC + 1);
+    for (let t = 0; t < nt; t++) rows(t, (r) => { start[r + 1]++; });
+    for (let r = 0; r < nB * nC; r++) start[r + 1] += start[r];
+    const at = new Float64Array(start[nB * nC]), wind = new Int8Array(start[nB * nC]);
+    const fill = start.slice(0, nB * nC);
+    for (let t = 0; t < nt; t++)
+      rows(t, (r, x, w) => { at[fill[r]] = x; wind[fill[r]++] = w; });
+    const order = [];
+    for (let j = 0; j < nB; j++)
+      for (let k = 0; k < nC; k++) {
+        const r = j * nC + k, s0 = start[r], s1 = start[r + 1];
+        if (s0 === s1) continue;
+        order.length = 0;
+        for (let q = s0; q < s1; q++) order.push(q);
+        order.sort((p, q) => at[p] - at[q]);
+        let q = 0, w = 0, par = 0;
+        const base = j * stride[B] + k * stride[C];
+        for (let i = 0; i < n[A]; i++) {
+          const x = lo[A] + i * res;
+          while (q < order.length && at[order[q]] < x) { w += wind[order[q]]; par ^= 1; q++; }
+          if (w !== 0 || par) votes[base + i * stride[A]]++;
+        }
+      }
+  }
+
+  // A face with solid on both sides of it is not surface. Two shells that
+  // overlap without being unioned leave each one's faces buried in the other,
+  // and the nearest of those is not what a blend should measure to. So a
+  // candidate nearest point is refused when a step of one cell off it, both
+  // ways along its face normal, lands somewhere *surely* inside -- a cell all
+  // eight of whose corners voted inside. "Surely" is what spares real surface:
+  // the step outward from it lands in a cell that is at least partly outside,
+  // unless a neighbour is closer than about a cell, which is the clearance the
+  // mesher cannot keep open anyway.
+  const deep = new Uint8Array(N);
+  for (let i = 0; i < nx - 1; i++)
+    for (let j = 0; j < ny - 1; j++)
+      for (let k = 0; k < nz - 1; k++) {
+        const c = (i * ny + j) * nz + k;
+        deep[c] = votes[c] >= 2 && votes[c + 1] >= 2 && votes[c + sJ] >= 2
+          && votes[c + sJ + 1] >= 2 && votes[c + sI] >= 2 && votes[c + sI + 1] >= 2
+          && votes[c + sI + sJ] >= 2 && votes[c + sI + sJ + 1] >= 2 ? 1 : 0;
+      }
+  const deepAt = (x, y, z) => {
+    const i = Math.floor((x - lo[0]) / res), j = Math.floor((y - lo[1]) / res),
+          k = Math.floor((z - lo[2]) / res);
+    return i >= 0 && j >= 0 && k >= 0 && i < nx - 1 && j < ny - 1 && k < nz - 1
+      && deep[(i * ny + j) * nz + k] === 1;
+  };
+
+  // ---- distance: the band ------------------------------------------------
+  const D2 = new Float32Array(N).fill(Infinity);
+  // which triangle is nearest, rather than the nearest point on it: handing
+  // a point on lets it go stale across a curved surface by a tenth of a
+  // millimetre or so, handing the triangle on and measuring afresh does not
+  const TI = new Int32Array(N).fill(-1);
+  const R = [0, 0, 0];
+  // each triangle's normal, one cell long: the step the buried-face test takes
+  const U = new Float32Array(3 * nt);
+  const buried = (t) => deepAt(R[0] + U[3 * t], R[1] + U[3 * t + 1], R[2] + U[3 * t + 2])
+                     && deepAt(R[0] - U[3 * t], R[1] - U[3 * t + 1], R[2] - U[3 * t + 2]);
+  // Three cells, not one: the sweeps can only hand on a triangle some
+  // neighbour already holds, and on a curved surface of small triangles the
+  // right one is often the next one over. Measured on a meshed blend at
+  // 0.6 mm: one and a half cells leaves the nodes 0.10 mm out, three leaves
+  // them 0.046 -- the byte encoding's own step is 0.063 -- for a third more
+  // time. A second round of sweeps buys nothing.
+  const band = 3 * res, cells = Math.ceil(band / res);
+  for (let t = 0; t < nt; t++) {
+    const o = 9 * t;
+    const ax = tris[o], ay = tris[o + 1], az = tris[o + 2];
+    const bx = tris[o + 3], by = tris[o + 4], bz = tris[o + 5];
+    const cx = tris[o + 6], cy = tris[o + 7], cz = tris[o + 8];
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    const qx = aby * acz - abz * acy, qy = abz * acx - abx * acz, qz = abx * acy - aby * acx;
+    const ql = Math.hypot(qx, qy, qz);
+    // no area, no surface: its edges belong to its neighbours as well
+    if (!(ql > 1e-12)) continue;
+    U[3 * t] = res * qx / ql; U[3 * t + 1] = res * qy / ql; U[3 * t + 2] = res * qz / ql;
+    const r0 = (v, a) => Math.floor((v - lo[a]) / res);
+    const i0 = Math.max(0, r0(Math.min(ax, bx, cx), 0) - cells);
+    const i1 = Math.min(nx - 1, r0(Math.max(ax, bx, cx), 0) + cells + 1);
+    const j0 = Math.max(0, r0(Math.min(ay, by, cy), 1) - cells);
+    const j1 = Math.min(ny - 1, r0(Math.max(ay, by, cy), 1) + cells + 1);
+    const k0 = Math.max(0, r0(Math.min(az, bz, cz), 2) - cells);
+    const k1 = Math.min(nz - 1, r0(Math.max(az, bz, cz), 2) + cells + 1);
+    for (let i = i0; i <= i1; i++) {
+      const px = lo[0] + i * res;
+      for (let j = j0; j <= j1; j++) {
+        const py = lo[1] + j * res;
+        for (let k = k0; k <= k1; k++) {
+          const pz = lo[2] + k * res;
+          if (Math.abs((px - ax) * qx + (py - ay) * qy + (pz - az) * qz) > band * ql) continue;
+          const c = (i * ny + j) * nz + k;
+          const dd = closestOnTri(tris, o, px, py, pz, R);
+          if (dd < D2[c] && !buried(t)) { D2[c] = dd; TI[c] = t; }
+        }
+      }
+    }
+  }
+
+  // ---- distance: the sweeps ----------------------------------------------
+  // Past range + a couple of cells the value is clamped anyway, so a
+  // neighbour that far out has nothing worth handing on.
+  const lim2 = (range + 2 * res) * (range + 2 * res);
+  for (let oct = 0; oct < 8; oct++) {
+    const di = oct & 1 ? -1 : 1, dj = oct & 2 ? -1 : 1, dk = oct & 4 ? -1 : 1;
+    for (let ii = 0; ii < nx; ii++) {
+      const i = di > 0 ? ii : nx - 1 - ii;
+      const px = lo[0] + i * res;
+      for (let jj = 0; jj < ny; jj++) {
+        const j = dj > 0 ? jj : ny - 1 - jj;
+        const py = lo[1] + j * res;
+        for (let kk = 0; kk < nz; kk++) {
+          const k = dk > 0 ? kk : nz - 1 - kk;
+          const pz = lo[2] + k * res;
+          const c = (i * ny + j) * nz + k;
+          let best = D2[c], from = -1;
+          const own = TI[c];
+          for (let s = 0; s < 3; s++) {
+            let nb;
+            if (s === 0) { const i2 = i - di; if (i2 < 0 || i2 >= nx) continue; nb = c - di * sI; }
+            else if (s === 1) { const j2 = j - dj; if (j2 < 0 || j2 >= ny) continue; nb = c - dj * sJ; }
+            else { const k2 = k - dk; if (k2 < 0 || k2 >= nz) continue; nb = c - dk; }
+            if (!(D2[nb] < lim2) || TI[nb] === own) continue;
+            // a big face can be buried in part: it is the point on it that
+            // has to be surface, so the test is asked again, of this point
+            const dd = closestOnTri(tris, 9 * TI[nb], px, py, pz, R);
+            if (dd < best && !buried(TI[nb])) { best = dd; from = TI[nb]; }
+          }
+          if (from >= 0) { D2[c] = best; TI[c] = from; }
+        }
+      }
+    }
+  }
+
+  // ---- quantise --------------------------------------------------------------
+  const data = new Uint8Array(N);
+  for (let c = 0; c < N; c++) {
+    const d = Math.min(Math.sqrt(D2[c]), range) / range;
+    data[c] = Math.round(((votes[c] >= 2 ? -d : d) + 1) / 2 * 255);
+  }
+  const box = [0, 1, 2].map(a => (n[a] - 1) * res / 2);
+  return {
+    field: { name: String(opts.name || 'Mesh'), nx, ny, nz, box, range, data, tex: null },
+    centre: [0, 1, 2].map(a => lo[a] + box[a])
+  };
+}
+
 // ----------------------------------------------------------------------
 // The public surface.
 //
@@ -1403,8 +1836,8 @@ const SinterForm = {
   decodeField, encodeField, sampleField,
   polygonSDF, profileExtent, wireExtent, slotItems, slotList, SWEEP_STRIDE,
   CON_STRIDE,
-  smin, smax, invRot, roundSlot,
-  sceneSDF, sceneBounds, surfaceNets, mesh, meshToSTL
+  smin, smax, invRot, roundSlot, triRho, TRI_RHO_MAX,
+  sceneSDF, sceneBounds, surfaceNets, mesh, meshToSTL, parseSTL, meshField
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterForm;
 root.SinterForm = SinterForm;

@@ -120,17 +120,29 @@ SF.constructs = [RIG.construct];
 const DIMS = { wire: SF.wireExtent(TEST_WIRE), sweep: PACKED.node.d,
                construct: RIG.node.d };
 
+// The right triangle carries its hypotenuse's rho in the round slot rather
+// than a rounding, so `round ? 1.5 : 0` would only ever test the straight one.
+// Each curve is a run of its own: straight, the ellipse, a parabola, and a
+// hyperbola tight enough into the corner to crowd the polygon's points.
+const SLOTS = { tri: [0, Math.SQRT2 - 1, 0.5, 0.85] };
+
 let worstEver = 0, worstWho = '';
 
+const RUNS = [];
 for (const key of SF.PRIM_KEYS) {
   if (SKIP.has(key)) continue;
   const P = SF.PRIMS[key];
+  for (const slot of SLOTS[key] || [P.round ? 1.5 : 0]) RUNS.push([key, slot]);
+}
+
+for (const [key, round] of RUNS) {
+  const P = SF.PRIMS[key];
   const d = (DIMS[key] || P.def).slice();
-  const round = P.round ? 1.5 : 0;
   const f = (x, y, z) => P.js([x, y, z], d, round, { fi: 0 });
-  const E = P.ext(d).map(v => v + round);
+  const E = P.ext(d).map(v => v + (P.round ? round : 0));
   const R = Math.max(E[0], E[1], E[2]);
-  console.log(`\n${P.name}  dims ${JSON.stringify(d)}${round ? ` round ${round}` : ''}`);
+  console.log(`\n${P.name}  dims ${JSON.stringify(d)}`
+    + (round ? ` ${P.round ? 'round' : 'slot'} ${+round.toFixed(4)}` : ''));
 
   // ---- 1. it encloses something ----------------------------------------
   let lo = Infinity;
@@ -191,6 +203,40 @@ for (const key of SF.PRIM_KEYS) {
     ok(true, `exact: false — bound only, eikonal holds at ${pct.toFixed(1)}% (not required)`);
   else
     ok(pct > 96, `|grad f| = 1 at ${pct.toFixed(1)}% of samples`);
+}
+
+// ---- the triangle's curve is the conic it says it is ----------------------
+// The four checks above would pass for any polygon at all. This one holds the
+// outline to the curve: points on the true conic must read as surface, to
+// within the chord sag pTri's comment promises, and the ellipse has to be the
+// quarter ellipse centred on the box's far corner -- that is the whole claim
+// behind offering it by name. Checked at the largest legs the dims allow,
+// where the sag is worst.
+{
+  console.log('\nRight triangle  hypotenuse against the true curve');
+  const P = SF.PRIMS.tri, X = 160, Y = 110, d = [X, Y, 10];
+  for (const rho of [Math.SQRT2 - 1, 0.25, 0.5, 0.85]) {
+    const w = rho / (1 - rho);
+    let worst = 0;
+    for (let i = 0; i <= 2000; i++) {
+      const t = i / 2000, u = 1 - t, den = u * u + 2 * w * t * u + t * t;
+      const v = P.js([X * u * u / den - X / 2, Y * t * t / den - Y / 2, 0], d, rho, {});
+      worst = Math.max(worst, Math.abs(v));
+    }
+    ok(worst < 0.06, `rho ${rho.toFixed(4)}: conic within ${worst.toFixed(4)} mm of the surface`);
+  }
+  let worst = 0;
+  for (let i = 0; i <= 2000; i++) {
+    const a = Math.PI * (1 + 0.5 * i / 2000);       // the quarter facing the corner
+    const v = P.js([X / 2 + X * Math.cos(a), Y / 2 + Y * Math.sin(a), 0], d,
+                   SF.roundSlot({ t: 'tri', hyp: 'ellipse' }), {});
+    worst = Math.max(worst, Math.abs(v));
+  }
+  ok(worst < 0.06, `hyp 'ellipse' is the quarter ellipse to ${worst.toFixed(4)} mm`);
+  const rs = (n) => SF.roundSlot(Object.assign({ t: 'tri' }, n));
+  ok(rs({}) === 0 && rs({ hyp: 'line', rho: 0.7 }) === 0 && rs({ hyp: 'conic', rho: 0.7 }) === 0.7
+     && rs({ hyp: 'conic', rho: 2 }) === SF.TRI_RHO_MAX && rs({ hyp: 'conic' }) === 0,
+     'roundSlot: only a conic reads rho, and it is clamped');
 }
 
 // The number a raymarcher needs: step by more than this fraction of the

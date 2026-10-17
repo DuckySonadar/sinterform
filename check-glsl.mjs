@@ -94,6 +94,17 @@ const cases = KEYS.map(k => {
   return { key: k, fn: GL.GLSL[k].fn, glsl: GL.GLSL[k].src, name: P.name, d, r, pts };
 });
 
+// The right triangle reads its hypotenuse's rho from the round slot, so the
+// loop above only compared the straight one -- the single pass, never the
+// thirty-two-point loop. The ellipse and a tight hyperbola go through it.
+// Each needs a key of its own, since results come back keyed.
+for (const [key, rho] of [['triEllipse', Math.SQRT2 - 1], ['triHyperbola', 0.85]]) {
+  const base = cases.find(c => c.key === 'tri');
+  cases.push(Object.assign({}, base, { key, r: rho,
+    name: `${base.name} (rho ${rho.toFixed(4)})`,
+    js: (p, dd, r) => SF.PRIMS.tri.js(p, dd, r, {}) }));
+}
+
 // `profile` is baked, so the loop above skipped it -- but unlike `field` it is
 // baked into *source*, not into a texture, so its twin is checkable here and
 // nowhere else. The GLSL side is whatever `slotDecls` unrolls for this

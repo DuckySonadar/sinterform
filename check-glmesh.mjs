@@ -65,7 +65,8 @@ const N = (t, o) => Object.assign({
 // and the blend; the rotated one exercises invRot, which is the most likely
 // thing to be transcribed differently between two shader assemblies; the
 // profile one puts a compiled-in outline through the GPU path, which nothing
-// else here does.
+// else here does; the triangle's rho rides in the round slot, so a conic one
+// is the test that packPlan asked roundSlot rather than reading `round`.
 const SCENES = {
   'a box and a sphere, blended': [{ id: 0, nodes: [
     N('box', { p: [-6, 0, 0], d: [30, 22, 16], round: 2, k: 4 }),
@@ -81,6 +82,9 @@ const SCENES = {
   ],
   'a profile, default outline': [{ id: 0, nodes: [
     N('profile', { d: [10, 10, 6], r: [0, 25, 15] })
+  ] }],
+  'a right triangle with a conic hypotenuse': [{ id: 0, nodes: [
+    N('tri', { d: [34, 22, 8], r: [0, 20, 10], hyp: 'conic', rho: 0.6, round: 3 })
   ] }]
 };
 
