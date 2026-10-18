@@ -120,11 +120,17 @@ SF.constructs = [RIG.construct];
 const DIMS = { wire: SF.wireExtent(TEST_WIRE), sweep: PACKED.node.d,
                construct: RIG.node.d };
 
-// The right triangle carries its hypotenuse's rho in the round slot rather
-// than a rounding, so `round ? 1.5 : 0` would only ever test the straight one.
-// Each curve is a run of its own: straight, the ellipse, a parabola, and a
-// hyperbola tight enough into the corner to crowd the polygon's points.
-const SLOTS = { tri: [0, Math.SQRT2 - 1, 0.5, 0.85] };
+// The right triangle carries its hypotenuse and land in the round slot rather
+// than a rounding, so `round ? 1.5 : 0` would only ever test the bare straight
+// one. Each is a run of its own: straight, the ellipse, a parabola, and a
+// hyperbola tight enough into the corner to crowd the polygon's points, then
+// each kind again with a land, and a land so wide it leaves only a rectangle.
+const TRI = (n) => SF.roundSlot(Object.assign({ t: 'tri' }, n));
+const SLOTS = { tri: [
+  TRI({}), TRI({ hyp: 'ellipse' }), TRI({ hyp: 'conic', rho: 0.5 }),
+  TRI({ hyp: 'conic', rho: 0.85 }), TRI({ land: 3 }), TRI({ hyp: 'ellipse', land: 2.5 }),
+  TRI({ hyp: 'conic', rho: 0.7, land: 4 }), TRI({ hyp: 'conic', rho: 0.5, land: 40 })
+] };
 
 let worstEver = 0, worstWho = '';
 
@@ -215,12 +221,17 @@ for (const [key, round] of RUNS) {
 {
   console.log('\nRight triangle  hypotenuse against the true curve');
   const P = SF.PRIMS.tri, X = 160, Y = 110, d = [X, Y, 10];
-  for (const rho of [Math.SQRT2 - 1, 0.25, 0.5, 0.85]) {
+  // rho travels to the shader in thousandths (see triSlot), so these are
+  // values it can carry exactly; the ellipse has its own exact code and is
+  // checked by name below. A rho with more places is rounded, which at these
+  // legs moves the shoulder by up to 0.05 mm.
+  for (const rho of [0.414, 0.25, 0.5, 0.85]) {
     const w = rho / (1 - rho);
     let worst = 0;
     for (let i = 0; i <= 2000; i++) {
       const t = i / 2000, u = 1 - t, den = u * u + 2 * w * t * u + t * t;
-      const v = P.js([X * u * u / den - X / 2, Y * t * t / den - Y / 2, 0], d, rho, {});
+      const v = P.js([X * u * u / den - X / 2, Y * t * t / den - Y / 2, 0], d,
+                     TRI({ hyp: 'conic', rho }), {});
       worst = Math.max(worst, Math.abs(v));
     }
     ok(worst < 0.06, `rho ${rho.toFixed(4)}: conic within ${worst.toFixed(4)} mm of the surface`);
@@ -233,10 +244,64 @@ for (const [key, round] of RUNS) {
     worst = Math.max(worst, Math.abs(v));
   }
   ok(worst < 0.06, `hyp 'ellipse' is the quarter ellipse to ${worst.toFixed(4)} mm`);
-  const rs = (n) => SF.roundSlot(Object.assign({ t: 'tri' }, n));
-  ok(rs({}) === 0 && rs({ hyp: 'line', rho: 0.7 }) === 0 && rs({ hyp: 'conic', rho: 0.7 }) === 0.7
-     && rs({ hyp: 'conic', rho: 2 }) === SF.TRI_RHO_MAX && rs({ hyp: 'conic' }) === 0,
-     'roundSlot: only a conic reads rho, and it is clamped');
+  const rh = (n) => SF.triRho(Object.assign({ t: 'tri' }, n));
+  ok(rh({}) === 0 && rh({ hyp: 'line', rho: 0.7 }) === 0 && rh({ hyp: 'conic', rho: 0.7 }) === 0.7
+     && rh({ hyp: 'conic', rho: 2 }) === SF.TRI_RHO_MAX && rh({ hyp: 'conic' }) === 0,
+     'triRho: only a conic reads rho, and it is clamped');
+}
+
+// ---- the land: square tips, and the curve moved in to meet them ------------
+// With a land w the tips must end in faces at right angles to the legs, w
+// tall, and the conic must run between (X, w) and (w, Y). Checked as the
+// claims they are: points on each end face read as surface, a hair inside a
+// face is solid and a hair outside it is not, the corner where face meets
+// curve is a right angle (the face's normal is along the leg all the way up),
+// and points on the moved conic read as surface.
+{
+  console.log('\nRight triangle  the land');
+  const P = SF.PRIMS.tri, X = 120, Y = 70, d = [X, Y, 10], land = 6.5;
+  const at = (x, y, slot) => P.js([x - X / 2, y - Y / 2, 0], d, slot, {});
+  for (const [name, n] of [['straight', {}], ['ellipse', { hyp: 'ellipse' }],
+                           ['conic 0.8', { hyp: 'conic', rho: 0.8 }]]) {
+    const slot = TRI(Object.assign({ land }, n));
+    let face = 0, side = 0;
+    for (let i = 0; i <= 200; i++) {
+      const y = land * i / 200;
+      face = Math.max(face, Math.abs(at(X, y, slot)), Math.abs(at(y, Y, slot)));
+      if (i > 2 && i < 198) {
+        // just inside the face is solid, just outside is not, on both tips
+        if (!(at(X - 0.05, y, slot) < 0 && at(X + 0.05, y, slot) > 0)) side++;
+        if (!(at(y, Y - 0.05, slot) < 0 && at(y, Y + 0.05, slot) > 0)) side++;
+      }
+    }
+    ok(face < 1e-9 && side === 0, `${name}: both tips end in a square face ${land} mm tall`
+       + (side ? ` — ${side} samples on the wrong side` : ''));
+    // the face's own normal at the very top of it, where it meets the curve
+    const h = 1e-4, y = land - 0.02;
+    const gx = (at(X + h, y, slot) - at(X - h, y, slot)) / (2 * h);
+    const gy = (at(X, y + h, slot) - at(X, y - h, slot)) / (2 * h);
+    ok(Math.abs(gx - 1) < 1e-3 && Math.abs(gy) < 1e-3,
+       `${name}: the face is square to the leg up to the curve (normal ${gx.toFixed(4)}, ${gy.toFixed(4)})`);
+  }
+  for (const rho of [0.414, 0.6]) {
+    const w = rho / (1 - rho), cx = X - land, cy = Y - land;
+    let worst = 0;
+    for (let i = 0; i <= 2000; i++) {
+      const t = i / 2000, u = 1 - t, den = u * u + 2 * w * t * u + t * t;
+      worst = Math.max(worst, Math.abs(at(land + cx * u * u / den, land + cy * t * t / den,
+                                          TRI({ hyp: 'conic', rho, land }))));
+    }
+    ok(worst < 0.06, `rho ${rho.toFixed(4)} with land: the curve runs (X, w) to (w, Y), `
+       + `within ${worst.toFixed(4)} mm`);
+  }
+  // the packing: what goes in comes out, and the ellipse stays exact
+  ok(TRI({ land: 163.83, hyp: 'ellipse' }) < 2 ** 24 && TRI({ land: 1e9 }) === TRI({ land: 163.83 })
+     && TRI({ land: 0.004 }) === 0 && TRI({ land: 12.34, hyp: 'conic', rho: 0.567 }) === 1234 * 1024 + 567,
+     'triSlot: land to 0.01 mm and rho to 0.001, one exact integer, clamped');
+  // a land as wide as the short leg leaves the rectangle it says
+  const rect = TRI({ hyp: 'conic', rho: 0.5, land: Y });
+  ok(Math.abs(at(X, Y * 0.99, rect)) < 1e-9 && at(X - 1, Y - 1, rect) < 0,
+     'a land the width of the short leg leaves a full rectangle');
 }
 
 // The number a raymarcher needs: step by more than this fraction of the

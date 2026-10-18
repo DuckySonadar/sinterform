@@ -163,6 +163,7 @@ these are the fields the kernel reads:
 | `mx`, `my`, `mz` | mirror across that axis (evaluates at `abs` of the coordinate) |
 | `fi` | which document entry: a `field`, a `profile`'s outline, or a `wire`'s path |
 | `hyp`, `rho` | a right triangle's hypotenuse: `'line'`, `'conic'` (bowed in by `rho`) or `'ellipse'` |
+| `land` | a right triangle's flat along both legs, mm: the tips end square, `land` tall |
 
 Shapes fold in order: each one is combined with the running distance so far,
 so a `cut` removes what is already there and the order of the list matters.
@@ -295,16 +296,23 @@ caller's, which is what keeps the packing out of here.
 
 One thing a consumer does have to know: **a baked field takes its `range`
 through the slot every other primitive uses for corner rounding,** and so does
-the right triangle its hypotenuse's rho. Neither has rounding, and the number
-has to arrive somehow. Do not reimplement that rule — ask for it:
+the right triangle its hypotenuse and land. Neither has rounding, and the
+numbers have to arrive somehow. Do not reimplement that rule — ask for it:
 
 ```js
-uData[b + 7] = SinterForm.roundSlot(node);   // rounding, a field's range, or a rho
+uData[b + 7] = SinterForm.roundSlot(node);   // rounding, a field's range, or a triangle's code
 ```
 
-`triRho(node)` is the triangle's half of it on its own: `'line'` (or nothing)
-is 0, `'ellipse'` is √2 − 1, `'conic'` is the node's `rho` clamped to
-`[0, TRI_RHO_MAX]`.
+The triangle's is two numbers in one float: `triSlot(node)` packs the land in
+hundredths of a mm times 1024 plus rho in thousandths, with 1000 reserved for
+the ellipse. Every integer below 2²⁴ is exact in a float32 and dividing by 1024
+is exact, so `pTri` unpacks exactly what was packed. `triRho(node)` and
+`triLand(node)` say what the node means: `'line'` (or nothing) is rho 0,
+`'ellipse'` √2 − 1, `'conic'` the node's `rho` clamped to `[0, TRI_RHO_MAX]`;
+the land is clamped to `[0, TRI_LAND_MAX]` and, in the shader, to the shorter
+leg. The price of the packing is resolution: land to 0.01 mm, rho to 0.001 —
+rounding a rho with more places moves the curve by up to 0.05 mm at the
+largest legs.
 
 `sceneSDF` asks the same function, so the two halves cannot disagree about
 what is in that uniform. Packing `round` there by hand gives a field multiplied
@@ -1304,11 +1312,14 @@ thin features *somewhere else in the scene*. The run ends by printing the
 loosest primitive and the maximum safe raymarch step it implies.
 
 The right triangle is run once per kind of hypotenuse — straight, the ellipse, a
-parabola, a tight hyperbola — since its curve rides in the round slot and the
-default run would only ever test the straight one. It then gets a check of its
-own: points on the true conic must read as surface to within the chord sag
-`pTri` promises, and `hyp: 'ellipse'` must be the quarter ellipse centred on
-the box's far corner.
+parabola, a tight hyperbola — and each again with a land, plus a land as wide
+as the short leg, since all of that rides in the round slot and the default run
+would only ever test the bare straight one. It then gets checks of its own:
+points on the true conic must read as surface to within the chord sag `pTri`
+promises, `hyp: 'ellipse'` must be the quarter ellipse centred on the box's far
+corner, and with a land both tips must end in faces exactly `land` tall and
+square to their legs right up to where the curve begins, with the conic moved
+in to run from (X, w) to (w, Y).
 
 ### `check-stl.mjs` — is an STL read back in the shape that went out?
 

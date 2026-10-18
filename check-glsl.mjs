@@ -94,14 +94,19 @@ const cases = KEYS.map(k => {
   return { key: k, fn: GL.GLSL[k].fn, glsl: GL.GLSL[k].src, name: P.name, d, r, pts };
 });
 
-// The right triangle reads its hypotenuse's rho from the round slot, so the
-// loop above only compared the straight one -- the single pass, never the
-// thirty-two-point loop. The ellipse and a tight hyperbola go through it.
+// The right triangle reads its hypotenuse and land from the round slot, so
+// the loop above only compared the bare straight one -- the single pass,
+// never the thirty-two-point loop, and no land. The ellipse, a tight
+// hyperbola and a conic with a land go through it, packed by roundSlot the
+// way every consumer packs them, so the GLSL's unpacking is on trial too.
 // Each needs a key of its own, since results come back keyed.
-for (const [key, rho] of [['triEllipse', Math.SQRT2 - 1], ['triHyperbola', 0.85]]) {
+for (const [key, n] of [['triEllipse', { hyp: 'ellipse' }],
+                        ['triHyperbola', { hyp: 'conic', rho: 0.85 }],
+                        ['triLand', { hyp: 'conic', rho: 0.6, land: 3.25 }]]) {
   const base = cases.find(c => c.key === 'tri');
-  cases.push(Object.assign({}, base, { key, r: rho,
-    name: `${base.name} (rho ${rho.toFixed(4)})`,
+  const r = SF.roundSlot(Object.assign({ t: 'tri' }, n));
+  cases.push(Object.assign({}, base, { key, r,
+    name: `${base.name} (${JSON.stringify(n)})`,
     js: (p, dd, r) => SF.PRIMS.tri.js(p, dd, r, {}) }));
 }
 
