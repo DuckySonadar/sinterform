@@ -161,15 +161,32 @@ const GLSL = {
   // A right triangle extruded along Z: legs d.x along +X and d.y along +Y from
   // the right-angle corner, d.z thick, centred in its box like everything else.
   //
-  // The hypotenuse may bow in toward the corner as a conic, and `r` is its rho
-  // -- the round slot again, for the reason a field's range uses it: this has
-  // no corner rounding and the number has to arrive somehow. roundSlot() is
-  // what fills it, from the node's `hyp` and `rho`. The conic is the CAD one:
-  // ends at the two leg tips, tangent to the legs there (so the apex is the
+  // The hypotenuse may bow in toward the corner as a conic. The conic is the
+  // CAD one: tangent to the legs where it meets them (so the apex is the
   // corner), with its shoulder rho of the way from the chord's midpoint to the
-  // corner. rho 0 is the straight hypotenuse, 0.5 a parabola, above that a
-  // hyperbola, and sqrt(2) - 1 exactly the quarter ellipse centred on the far
-  // corner of the box -- which is all an "elliptical" hypotenuse is, here.
+  // corner. rho 0 is straight, 0.5 a parabola, above that a hyperbola, and
+  // sqrt(2) - 1 exactly the quarter ellipse centred on the far corner.
+  //
+  // Tangent to the legs means a knife edge at each tip, so the triangle also
+  // takes a *land*: a flat of width w laid along both legs, inside the box.
+  // Each tip then ends in a square face w tall, at right angles to its leg,
+  // and the curve runs between (X, w) and (w, Y) -- tangent to the land's
+  // inner edges rather than the legs. The outline is
+  //
+  //     (0,0) -> (X,0) -> (X,w) -> curve -> (w,Y) -> (0,Y) -> back
+  //
+  // and w = 0 is the bare triangle. The box never moves: Leg X and Leg Y stay
+  // the overall size, which is what the bounds and the sliders say.
+  //
+  // Both numbers come through the round slot, which is the only float a shape
+  // has spare -- the triangle has no rounding, and a field already uses the
+  // same slot for its range. roundSlot() packs them as one exact integer:
+  // land in hundredths of a mm times 1024, plus rho in thousandths, with 1000
+  // reserved for the ellipse so it stays exactly sqrt(2) - 1. Every integer to
+  // 2^24 is exact in a float32, and dividing by 1024 is exact, so the shader
+  // unpacks precisely what was packed. A raw rho passed here by hand reads as
+  // a near-straight hypotenuse with no land, which is visibly wrong rather
+  // than quietly so.
   //
   // As a rational quadratic Bezier the conic is (X(1-t)^2, Y t^2) over
   // (1-t)^2 + 2wt(1-t) + t^2 with w = rho/(1-rho). The exact distance to a
@@ -181,30 +198,39 @@ const GLSL = {
   // already crowds the points into the tight bend as rho rises, which is where
   // they are needed. A straight hypotenuse takes one pass, not thirty-two.
   //
-  // The horizontal leg never crosses a horizontal ray, so the crossing count
-  // only needs the vertical one written out beside the loop.
+  // Horizontal edges never cross a horizontal ray, so of the five straight
+  // edges only the two vertical ones -- the left leg and the right tip's face
+  // -- join the crossing count beside the loop.
   tri: { fn: 'pTri',
     src: `float pTri(vec3 p, vec3 d, float r){
   vec2 L = max(d.xy, vec2(1e-4));
   vec2 q = p.xy + 0.5*L;
-  float rho = clamp(r, 0.0, 0.95);
+  float code = max(r, 0.0);
+  float wq = floor(code/1024.0);
+  float rq = code - wq*1024.0;
+  float rho = (rq >= 1000.0) ? 0.41421356237309515 : min(rq, 950.0)*0.001;
+  float land = min(wq*0.01, min(L.x, L.y));
+  vec2 C = max(L - land, vec2(0.0));
   float wt = rho/(1.0 - rho);
   int n = (wt > 0.0) ? 32 : 1;
   float dt = (wt > 0.0) ? 1.0/32.0 : 1.0;
   vec2 lx = q - vec2(clamp(q.x, 0.0, L.x), 0.0);
   vec2 ly = q - vec2(0.0, clamp(q.y, 0.0, L.y));
-  float dd = min(dot(lx, lx), dot(ly, ly));
+  vec2 ex = q - vec2(L.x, clamp(q.y, 0.0, land));
+  vec2 ey = q - vec2(clamp(q.x, 0.0, land), L.y);
+  float dd = min(min(dot(lx, lx), dot(ly, ly)), min(dot(ex, ex), dot(ey, ey)));
   bool ins = q.x < 0.0 && q.y >= 0.0 && q.y < L.y;
-  vec2 a = vec2(L.x, 0.0);
+  if (q.x < L.x && q.y >= 0.0 && q.y < land) ins = !ins;
+  vec2 a = vec2(L.x, land);
   float t = 0.0;
   for (int i = 0; i < n; i++) {
     t += dt;
     float u = 1.0 - t;
     float den = u*u + 2.0*wt*t*u + t*t;
-    vec2 b = vec2(L.x*u*u, L.y*t*t)/den;
+    vec2 b = vec2(land + C.x*u*u/den, land + C.y*t*t/den);
     vec2 e = b - a;
     vec2 w = q - a;
-    vec2 h = w - e*clamp(dot(w, e)/dot(e, e), 0.0, 1.0);
+    vec2 h = w - e*clamp(dot(w, e)/max(dot(e, e), 1e-12), 0.0, 1.0);
     dd = min(dd, dot(h, h));
     bool c1 = q.y >= a.y;
     bool c2 = q.y < b.y;

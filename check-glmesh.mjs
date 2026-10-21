@@ -83,8 +83,8 @@ const SCENES = {
   'a profile, default outline': [{ id: 0, nodes: [
     N('profile', { d: [10, 10, 6], r: [0, 25, 15] })
   ] }],
-  'a right triangle with a conic hypotenuse': [{ id: 0, nodes: [
-    N('tri', { d: [34, 22, 8], r: [0, 20, 10], hyp: 'conic', rho: 0.6, round: 3 })
+  'a right triangle with a conic hypotenuse and a land': [{ id: 0, nodes: [
+    N('tri', { d: [34, 22, 8], r: [0, 20, 10], hyp: 'conic', rho: 0.6, land: 2, round: 3 })
   ] }]
 };
 

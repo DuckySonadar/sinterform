@@ -690,28 +690,39 @@ const TWINS = {
     let d_0 = d[0], d_1 = d[1], d_2 = d[2];
     let L_0 = Math.max(d_0, 1e-4), L_1 = Math.max(d_1, 1e-4);
     let q_0 = (p_0 + (0.5 * L_0)), q_1 = (p_1 + (0.5 * L_1));
-    let rho = Math.min(Math.max(r, 0.0), 0.95);
+    let code = Math.max(r, 0.0);
+    let wq = Math.floor((code / 1024.0));
+    let rq = (code - (wq * 1024.0));
+    const t0 = (rq >= 1000.0);
+    let rho = (t0 ? 0.41421356237309515 : (Math.min(rq, 950.0) * 0.001));
+    let land = Math.min((wq * 0.01), Math.min(L_0, L_1));
+    let C_0 = Math.max((L_0 - land), 0.0), C_1 = Math.max((L_1 - land), 0.0);
     let wt = (rho / (1.0 - rho));
-    const t0 = (wt > 0.0);
-    let n = (t0 ? 32 : 1);
     const t1 = (wt > 0.0);
-    let dt = (t1 ? (1.0 / 32.0) : 1.0);
+    let n = (t1 ? 32 : 1);
+    const t2 = (wt > 0.0);
+    let dt = (t2 ? (1.0 / 32.0) : 1.0);
     let lx_0 = (q_0 - Math.min(Math.max(q_0, 0.0), L_0)), lx_1 = (q_1 - 0.0);
     let ly_0 = (q_0 - 0.0), ly_1 = (q_1 - Math.min(Math.max(q_1, 0.0), L_1));
-    let dd = Math.min((lx_0*lx_0 + lx_1*lx_1), (ly_0*ly_0 + ly_1*ly_1));
+    let ex_0 = (q_0 - L_0), ex_1 = (q_1 - Math.min(Math.max(q_1, 0.0), land));
+    let ey_0 = (q_0 - Math.min(Math.max(q_0, 0.0), land)), ey_1 = (q_1 - L_1);
+    let dd = Math.min(Math.min((lx_0*lx_0 + lx_1*lx_1), (ly_0*ly_0 + ly_1*ly_1)), Math.min((ex_0*ex_0 + ex_1*ex_1), (ey_0*ey_0 + ey_1*ey_1)));
     let ins = (((q_0 < 0.0) && (q_1 >= 0.0)) && (q_1 < L_1));
-    let a_0 = L_0, a_1 = 0.0;
+    if ((((q_0 < L_0) && (q_1 >= 0.0)) && (q_1 < land))) {
+      ins = (!ins);
+    }
+    let a_0 = L_0, a_1 = land;
     let t = 0.0;
     let i = 0;
     for (; (i < n);) {
       t += dt;
       let u = (1.0 - t);
       let den = (((u * u) + (((2.0 * wt) * t) * u)) + (t * t));
-      let b_0 = (((L_0 * u) * u) / den), b_1 = (((L_1 * t) * t) / den);
+      let b_0 = (land + (((C_0 * u) * u) / den)), b_1 = (land + (((C_1 * t) * t) / den));
       let e_0 = (b_0 - a_0), e_1 = (b_1 - a_1);
       let w_0 = (q_0 - a_0), w_1 = (q_1 - a_1);
-      const t2 = Math.min(Math.max(((w_0*e_0 + w_1*e_1) / (e_0*e_0 + e_1*e_1)), 0.0), 1.0);
-      let h_0 = (w_0 - (e_0 * t2)), h_1 = (w_1 - (e_1 * t2));
+      const t3 = Math.min(Math.max(((w_0*e_0 + w_1*e_1) / Math.max((e_0*e_0 + e_1*e_1), 1e-12)), 0.0), 1.0);
+      let h_0 = (w_0 - (e_0 * t3)), h_1 = (w_1 - (e_1 * t3));
       dd = Math.min(dd, (h_0*h_0 + h_1*h_1));
       let c1 = (q_1 >= a_1);
       let c2 = (q_1 < b_1);
@@ -1080,8 +1091,9 @@ const PRIMS = {
     // A right triangle slab: the legs lie along +X and +Y from the right-angle
     // corner, which sits at (-X/2, -Y/2) so the box is centred like every
     // other primitive's. The hypotenuse is straight, or a conic bowed in toward
-    // the corner -- the node's `hyp` and `rho`, which reach the twins through
-    // the round slot (see roundSlot below and pTri in glsl.js).
+    // the corner, and a land squares off the tips -- the node's `hyp`, `rho`
+    // and `land`, which reach the twins through the round slot (see roundSlot
+    // below and pTri in glsl.js).
     name: 'Right triangle', round: false,
     dims: [['Leg X', 0.5, 160, 0.5], ['Leg Y', 0.5, 160, 0.5],
            ['Thickness', 0.5, 160, 0.5]],
@@ -1200,22 +1212,35 @@ function dimUnit(t, i) {
 // exactly like a texture that never arrived. Now both halves ask here.
 //
 // The right triangle is the second tenant, for the same reason: it has no
-// rounding, and its hypotenuse's rho has to arrive somehow. The node says
-// which curve in words -- `hyp` is 'line', 'conic' or 'ellipse' -- and only
-// 'conic' reads `rho`, so switching to the ellipse and back keeps the rho you
-// had. An ellipse is the conic at sqrt(2) - 1, and it is written here once
-// rather than at every call site.
-const TRI_RHO_MAX = 0.95;
+// rounding, and its hypotenuse's rho and its land both have to arrive
+// somehow. The node says which curve in words -- `hyp` is 'line', 'conic' or
+// 'ellipse' -- and only 'conic' reads `rho`, so switching to the ellipse and
+// back keeps the rho you had. `land` is the flat along the legs, in mm.
+//
+// Two numbers, one float: the slot holds land in hundredths of a mm times
+// 1024, plus rho in thousandths, with 1000 meaning the ellipse exactly. Both
+// fit in the 24 bits a float32 holds exactly, so the shader's unpacking is
+// exact too (see pTri in glsl.js). triRho and triLand say what the node
+// means; triSlot is what is packed.
+const TRI_RHO_MAX = 0.95, TRI_LAND_MAX = 163.83;
 function triRho(n) {
   if (n.hyp === 'ellipse') return Math.SQRT2 - 1;
   if (n.hyp !== 'conic') return 0;
   const r = +n.rho;
   return r > 0 ? Math.min(r, TRI_RHO_MAX) : 0;
 }
+function triLand(n) {
+  const w = +n.land;
+  return w > 0 ? Math.min(w, TRI_LAND_MAX) : 0;
+}
+function triSlot(n) {
+  const r = n.hyp === 'ellipse' ? 1000 : Math.round(triRho(n) * 1000);
+  return Math.round(triLand(n) * 100) * 1024 + r;
+}
 function roundSlot(n) {
   if (n && n.t === 'field')
     return ((fields[(n && n.fi) || 0] || {}).range) || 0;
-  if (n && n.t === 'tri') return triRho(n);
+  if (n && n.t === 'tri') return triSlot(n);
   return (n && n.round) || 0;
 }
 
@@ -1836,7 +1861,7 @@ const SinterForm = {
   decodeField, encodeField, sampleField,
   polygonSDF, profileExtent, wireExtent, slotItems, slotList, SWEEP_STRIDE,
   CON_STRIDE,
-  smin, smax, invRot, roundSlot, triRho, TRI_RHO_MAX,
+  smin, smax, invRot, roundSlot, triRho, triLand, triSlot, TRI_RHO_MAX, TRI_LAND_MAX,
   sceneSDF, sceneBounds, surfaceNets, mesh, meshToSTL, parseSTL, meshField
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = SinterForm;
